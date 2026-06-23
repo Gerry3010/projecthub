@@ -51,16 +51,35 @@ type Root struct {
 	unlocked bool
 	store    *store.Store
 	projects []domain.ProjectRef
+	selected *domain.ProjectRef // non-nil → showing a project's detail page
 
 	// new-project form
 	newTitle string
 }
 
 func (r *Root) Render() app.UI {
-	if !r.unlocked {
+	switch {
+	case !r.unlocked:
 		return r.loginView()
+	case r.selected != nil:
+		return &ProjectPage{Store: r.store, Ref: *r.selected, Back: r.closeProject}
+	default:
+		return r.projectsView()
 	}
-	return r.projectsView()
+}
+
+// openProject shows a project's detail page.
+func (r *Root) openProject(ref domain.ProjectRef) func(ctx app.Context, e app.Event) {
+	return func(ctx app.Context, _ app.Event) {
+		r.selected = &ref
+	}
+}
+
+// closeProject returns to the project list, refreshing it.
+func (r *Root) closeProject(ctx app.Context) {
+	r.selected = nil
+	r.busy, r.status = true, ""
+	ctx.Async(func() { r.reload(ctx, nil) })
 }
 
 // ─── login / unlock ─────────────────────────────────────────────────────────
@@ -153,7 +172,7 @@ func (r *Root) projectsView() app.UI {
 			app.Range(r.projects).Slice(func(i int) app.UI {
 				p := r.projects[i]
 				return app.Li().Class("ph-item").Body(
-					app.Span().Class("ph-title").Text(p.Title),
+					app.Button().Class("ph-title ph-titlebtn").Text(p.Title).OnClick(r.openProject(p)),
 					app.Button().Class("ph-link").Text("löschen").OnClick(func(ctx app.Context, _ app.Event) {
 						r.deleteProject(ctx, p.ID)
 					}),
@@ -214,7 +233,11 @@ func (r *Root) reload(ctx app.Context, mutate func()) {
 // ─── helpers ────────────────────────────────────────────────────────────────
 
 // bind returns an input handler that writes the element's value into dst.
-func (r *Root) bind(dst *string) app.EventHandler {
+func (r *Root) bind(dst *string) app.EventHandler { return bindInput(dst) }
+
+// bindInput returns an input handler that writes the element's value into dst.
+// Shared by the login/project-list and project-detail components.
+func bindInput(dst *string) app.EventHandler {
 	return func(ctx app.Context, e app.Event) {
 		*dst = ctx.JSSrc().Get("value").String()
 	}
