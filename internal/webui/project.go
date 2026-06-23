@@ -46,8 +46,22 @@ type ProjectPage struct {
 	pins    []store.Item[domain.PinnedItem]
 	files   []store.Item[domain.FileBlob]
 
+	// note form (doubles as editor when editNoteID != "")
 	newNoteTitle string
 	newNoteBody  string
+	editNoteID   string
+
+	// pin form
+	pinLabel   string
+	pinRelPath string
+	pinIsDir   bool
+
+	// manual tab-set form
+	tsTitle string
+	tsURLs  string
+
+	// id of the file currently previewed inline ("" = none)
+	previewID string
 }
 
 // OnMount loads the project's contents once the component is in the DOM.
@@ -82,12 +96,21 @@ func (p *ProjectPage) Render() app.UI {
 // ─── notes ──────────────────────────────────────────────────────────────────
 
 func (p *ProjectPage) notesSection() app.UI {
+	saveLabel := "Notiz speichern"
+	if p.editNoteID != "" {
+		saveLabel = "Notiz aktualisieren"
+	}
 	return app.Section().Class("ph-section").Body(
 		app.H2().Text("Notizen"),
 		app.Div().Class("ph-noteform").Body(
 			app.Input().Type("text").Placeholder("Titel").Value(p.newNoteTitle).OnInput(bindInput(&p.newNoteTitle)),
 			app.Textarea().Class("ph-textarea").Placeholder("Notiz…").Text(p.newNoteBody).OnInput(bindInput(&p.newNoteBody)),
-			app.Button().Class("ph-btn").Disabled(p.busy).Text("Notiz speichern").OnClick(p.addNote),
+			app.Div().Class("ph-row").Body(
+				app.Button().Class("ph-btn").Disabled(p.busy).Text(saveLabel).OnClick(p.saveNote),
+				app.If(p.editNoteID != "", func() app.UI {
+					return app.Button().Class("ph-link").Text("abbrechen").OnClick(p.cancelEditNote)
+				}),
+			),
 		),
 		app.Ul().Class("ph-list").Body(
 			app.Range(p.notes).Slice(func(i int) app.UI {
@@ -97,9 +120,15 @@ func (p *ProjectPage) notesSection() app.UI {
 						app.Strong().Text(orDash(n.Doc.Title)),
 						app.P().Class("ph-muted").Text(n.Doc.Body),
 					),
-					app.Button().Class("ph-link").Text("löschen").OnClick(func(ctx app.Context, _ app.Event) {
-						p.run(ctx, func() error { return p.Store.DeleteNote(context.Background(), n.ID) })
-					}),
+					app.Div().Body(
+						app.Button().Class("ph-link").Text("bearbeiten").OnClick(func(ctx app.Context, _ app.Event) {
+							p.editNoteID = n.ID
+							p.newNoteTitle, p.newNoteBody = n.Doc.Title, n.Doc.Body
+						}),
+						app.Button().Class("ph-link").Text("löschen").OnClick(func(ctx app.Context, _ app.Event) {
+							p.run(ctx, func() error { return p.Store.DeleteNote(context.Background(), n.ID) })
+						}),
+					),
 				)
 			}),
 			app.If(len(p.notes) == 0, func() app.UI { return app.Li().Class("ph-muted").Text("Keine Notizen.") }),
@@ -107,15 +136,24 @@ func (p *ProjectPage) notesSection() app.UI {
 	)
 }
 
-func (p *ProjectPage) addNote(ctx app.Context, _ app.Event) {
+// saveNote creates a new note, or updates the one currently being edited.
+func (p *ProjectPage) saveNote(ctx app.Context, _ app.Event) {
 	if p.busy || (p.newNoteTitle == "" && p.newNoteBody == "") {
 		return
 	}
 	doc := domain.NoteDoc{Title: p.newNoteTitle, Body: p.newNoteBody, UpdatedAt: time.Now()}
+	editID := p.editNoteID
 	p.runThen(ctx, func() error {
+		if editID != "" {
+			return p.Store.UpdateNote(context.Background(), editID, p.Ref.FolderID, doc)
+		}
 		_, err := p.Store.CreateNote(context.Background(), p.Ref.FolderID, doc)
 		return err
-	}, func() { p.newNoteTitle, p.newNoteBody = "", "" })
+	}, func() { p.newNoteTitle, p.newNoteBody, p.editNoteID = "", "", "" })
+}
+
+func (p *ProjectPage) cancelEditNote(ctx app.Context, _ app.Event) {
+	p.editNoteID, p.newNoteTitle, p.newNoteBody = "", "", ""
 }
 
 // ─── files ──────────────────────────────────────────────────────────────────
@@ -127,17 +165,25 @@ func (p *ProjectPage) filesSection() app.UI {
 		app.Ul().Class("ph-list").Body(
 			app.Range(p.files).Slice(func(i int) app.UI {
 				f := p.files[i]
-				return app.Li().Class("ph-item").Body(
-					app.Div().Body(
-						app.Strong().Text(f.Val.Filename),
-						app.Span().Class("ph-muted").Text(fmt.Sprintf("  %s · %s", humanSize(f.Val.Size), orDash(f.Val.MIME))),
+				return app.Li().Class("ph-item ph-fileitem").Body(
+					app.Div().Class("ph-filerow").Body(
+						app.Div().Body(
+							app.Strong().Text(f.Val.Filename),
+							app.Span().Class("ph-muted").Text(fmt.Sprintf("  %s · %s", humanSize(f.Val.Size), orDash(f.Val.MIME))),
+						),
+						app.Div().Body(
+							app.If(previewable(f.Val), func() app.UI {
+								return app.Button().Class("ph-link").Text(toggleLabel(p.previewID == f.ID)).OnClick(func(ctx app.Context, _ app.Event) {
+									p.previewID = toggle(p.previewID, f.ID)
+								})
+							}),
+							app.A().Class("ph-link").Href(dataURL(f.Val)).Download(f.Val.Filename).Text("herunterladen"),
+							app.Button().Class("ph-link").Text("löschen").OnClick(func(ctx app.Context, _ app.Event) {
+								p.run(ctx, func() error { return p.Store.DeleteItem(context.Background(), f.ID) })
+							}),
+						),
 					),
-					app.Div().Body(
-						app.A().Class("ph-link").Href(dataURL(f.Val)).Download(f.Val.Filename).Text("herunterladen"),
-						app.Button().Class("ph-link").Text("löschen").OnClick(func(ctx app.Context, _ app.Event) {
-							p.run(ctx, func() error { return p.Store.DeleteItem(context.Background(), f.ID) })
-						}),
-					),
+					app.If(p.previewID == f.ID, func() app.UI { return filePreview(f.Val) }),
 				)
 			}),
 			app.If(len(p.files) == 0, func() app.UI { return app.Li().Class("ph-muted").Text("Keine Dateien.") }),
@@ -181,7 +227,12 @@ func (p *ProjectPage) uploadFile(ctx app.Context, _ app.Event) {
 func (p *ProjectPage) tabsetsSection() app.UI {
 	return app.Section().Class("ph-section").Body(
 		app.H2().Text("Tab-Sets"),
-		app.P().Class("ph-muted").Text("Tab-Sets werden vom TUI-Companion gespeichert."),
+		app.P().Class("ph-muted").Text("Der TUI-Companion speichert offene Browser-Tabs; hier kannst du auch manuell eines anlegen (eine URL pro Zeile)."),
+		app.Div().Class("ph-noteform").Body(
+			app.Input().Type("text").Placeholder("Titel").Value(p.tsTitle).OnInput(bindInput(&p.tsTitle)),
+			app.Textarea().Class("ph-textarea").Placeholder("https://…\nhttps://…").Text(p.tsURLs).OnInput(bindInput(&p.tsURLs)),
+			app.Button().Class("ph-btn").Disabled(p.busy).Text("Tab-Set anlegen").OnClick(p.addTabSet),
+		),
 		app.Ul().Class("ph-list").Body(
 			app.Range(p.tabsets).Slice(func(i int) app.UI {
 				ts := p.tabsets[i]
@@ -210,7 +261,16 @@ func (p *ProjectPage) tabsetsSection() app.UI {
 func (p *ProjectPage) pinsSection() app.UI {
 	return app.Section().Class("ph-section").Body(
 		app.H2().Text("Angeheftete Pfade"),
-		app.P().Class("ph-muted").Text("Öffnen nur über den TUI-Companion (lokaler Index-Root)."),
+		app.P().Class("ph-muted").Text("Relativ zum lokalen Index-Root; Öffnen nur über den TUI-Companion."),
+		app.Div().Class("ph-noteform").Body(
+			app.Input().Type("text").Placeholder("Label").Value(p.pinLabel).OnInput(bindInput(&p.pinLabel)),
+			app.Input().Type("text").Placeholder("relativer Pfad (z.B. docs/spec.md)").Value(p.pinRelPath).OnInput(bindInput(&p.pinRelPath)),
+			app.Label().Class("ph-check").Body(
+				app.Input().Type("checkbox").Checked(p.pinIsDir).OnChange(bindCheck(&p.pinIsDir)),
+				app.Text(" Ordner"),
+			),
+			app.Button().Class("ph-btn").Disabled(p.busy).Text("Pfad anheften").OnClick(p.addPin),
+		),
 		app.Ul().Class("ph-list").Body(
 			app.Range(p.pins).Slice(func(i int) app.UI {
 				pin := p.pins[i]
@@ -227,6 +287,42 @@ func (p *ProjectPage) pinsSection() app.UI {
 			app.If(len(p.pins) == 0, func() app.UI { return app.Li().Class("ph-muted").Text("Keine angehefteten Pfade.") }),
 		),
 	)
+}
+
+func (p *ProjectPage) addTabSet(ctx app.Context, _ app.Event) {
+	if p.busy {
+		return
+	}
+	var tabs []domain.Tab
+	for _, line := range strings.Split(p.tsURLs, "\n") {
+		if u := strings.TrimSpace(line); u != "" {
+			tabs = append(tabs, domain.Tab{URL: u})
+		}
+	}
+	if len(tabs) == 0 {
+		p.fail(ctx, "Mindestens eine URL angeben")
+		return
+	}
+	title := p.tsTitle
+	if title == "" {
+		title = "Manuell"
+	}
+	ts := domain.TabSet{Title: title, Browser: "manual", Tabs: tabs, SavedAt: time.Now()}
+	p.runThen(ctx, func() error {
+		_, err := p.Store.CreateTabSet(context.Background(), p.Ref.FolderID, ts)
+		return err
+	}, func() { p.tsTitle, p.tsURLs = "", "" })
+}
+
+func (p *ProjectPage) addPin(ctx app.Context, _ app.Event) {
+	if p.busy || p.pinRelPath == "" {
+		return
+	}
+	pin := domain.PinnedItem{Label: p.pinLabel, RelPath: p.pinRelPath, IsDir: p.pinIsDir}
+	p.runThen(ctx, func() error {
+		_, err := p.Store.CreatePin(context.Background(), p.Ref.FolderID, pin)
+		return err
+	}, func() { p.pinLabel, p.pinRelPath, p.pinIsDir = "", "", false })
 }
 
 // ─── data loading + mutation plumbing ───────────────────────────────────────
@@ -295,6 +391,45 @@ func (p *ProjectPage) fail(ctx app.Context, msg string) {
 }
 
 // ─── small helpers ──────────────────────────────────────────────────────────
+
+// previewable reports whether a file can be shown inline (images and text).
+func previewable(f domain.FileBlob) bool {
+	return strings.HasPrefix(f.MIME, "image/") || isText(f.MIME)
+}
+
+func isText(mime string) bool {
+	return strings.HasPrefix(mime, "text/") ||
+		mime == "application/json" || mime == "application/xml"
+}
+
+// filePreview renders an inline preview: an <img> for images, a <pre> for text.
+func filePreview(f domain.FileBlob) app.UI {
+	if strings.HasPrefix(f.MIME, "image/") {
+		return app.Img().Class("ph-preview-img").Src(dataURL(f))
+	}
+	return app.Pre().Class("ph-preview-text").Text(string(f.Bytes))
+}
+
+func toggle(cur, id string) string {
+	if cur == id {
+		return ""
+	}
+	return id
+}
+
+func toggleLabel(open bool) string {
+	if open {
+		return "Vorschau aus"
+	}
+	return "Vorschau"
+}
+
+// bindCheck returns a change handler that writes a checkbox's state into dst.
+func bindCheck(dst *bool) app.EventHandler {
+	return func(ctx app.Context, e app.Event) {
+		*dst = ctx.JSSrc().Get("checked").Bool()
+	}
+}
 
 // openTabs reopens each URL in a new browser tab via window.open.
 func openTabs(tabs []domain.Tab) {
