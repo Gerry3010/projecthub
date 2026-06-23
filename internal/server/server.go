@@ -54,6 +54,12 @@ func New(cfg Config) (http.Handler, error) {
 	// bearer tokens. middleware.Logger only records method/path/status/latency.
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
+	// Compress responses — app.wasm is ~13 MB uncompressed but gzips to ~¼ of
+	// that, and the browser transparently decodes Content-Encoding before
+	// WebAssembly.instantiateStreaming sees it. NOTE: this only shrinks transfer
+	// size; the on-disk/in-memory wasm stays large. Further size wins (TinyGo,
+	// brotli, code-splitting) are tracked separately.
+	r.Use(middleware.Compress(5, "application/wasm", "application/javascript", "text/css", "text/html", "image/svg+xml"))
 	r.Use(securityHeaders)
 
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {

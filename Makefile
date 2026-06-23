@@ -30,10 +30,12 @@ run: wasm
 test:
 	go test ./...
 
-## vet: static checks for native + wasm targets
+## vet: static checks for native + wasm targets. The wasm pass only covers the
+## packages that compile into the frontend; the TUI/tabsession/local/server are
+## native-only (bubbletea, os/exec, net/http server) and never built for wasm.
 vet:
 	go vet ./...
-	GOOS=js GOARCH=wasm go vet ./cmd/web ./internal/...
+	GOOS=js GOARCH=wasm go vet ./cmd/web ./internal/webui ./internal/core/...
 
 clean:
 	rm -f web/app.wasm
