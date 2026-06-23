@@ -1,0 +1,7 @@
+# build artifacts
+/build/
+/web/app.wasm
+
+# go workspace (dev-only; depends on a local Passbubble checkout next door)
+go.work
+go.work.sum

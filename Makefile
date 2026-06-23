@@ -1,0 +1,40 @@
+# Copyright (C) 2026 Gerald Hofbauer <info@geraldhofbauer.net> — AGPLv3.
+
+PASSBUBBLE_URL ?= http://localhost:8080
+PORT           ?= 8090
+
+.PHONY: all wasm server run tui test vet build clean
+
+all: build
+
+## wasm: build the go-app frontend → web/app.wasm
+wasm:
+	GOOS=js GOARCH=wasm go build -o web/app.wasm ./cmd/web
+
+## server: build the web server binary → build/server
+server:
+	go build -o build/server ./cmd/server
+
+## tui: build the TUI companion → build/tui (placeholder until implemented)
+tui:
+	go build -o build/tui ./cmd/tui
+
+## build: wasm frontend + server + tui
+build: wasm server
+
+## run: build the wasm frontend, then run the server (serves on $(PORT))
+run: wasm
+	PORT=$(PORT) PASSBUBBLE_URL=$(PASSBUBBLE_URL) go run ./cmd/server
+
+## test: native unit tests (crypto interop, store round-trip, server proxy/CSP)
+test:
+	go test ./...
+
+## vet: static checks for native + wasm targets
+vet:
+	go vet ./...
+	GOOS=js GOARCH=wasm go vet ./cmd/web ./internal/...
+
+clean:
+	rm -f web/app.wasm
+	rm -rf build

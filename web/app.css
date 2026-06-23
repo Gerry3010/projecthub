@@ -1,0 +1,100 @@
+/* Copyright (C) 2026 Gerald Hofbauer <info@geraldhofbauer.net> — AGPLv3.
+   Minimal hand-written styles for the ProjectHub skeleton. Tailwind replaces
+   this in a later phase. */
+
+:root {
+  --bg: #0f1115;
+  --card: #181b22;
+  --fg: #e6e8eb;
+  --muted: #8b93a1;
+  --accent: #6d8bff;
+  --err: #ff6b6b;
+  --border: #262b34;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.ph-center {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 1.5rem;
+}
+
+.ph-card {
+  width: 100%;
+  max-width: 360px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 1.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.ph-card h1, .ph-header h1 { margin: 0 0 0.25rem; font-size: 1.4rem; }
+.ph-muted { color: var(--muted); font-size: 0.9rem; margin: 0; }
+.ph-err { color: var(--err); font-size: 0.9rem; margin: 0; }
+
+input {
+  background: #0d0f13;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  color: var(--fg);
+  padding: 0.65rem 0.8rem;
+  font-size: 1rem;
+}
+input:focus { outline: 2px solid var(--accent); outline-offset: 0; }
+
+.ph-btn {
+  background: var(--accent);
+  color: #0b1020;
+  border: 0;
+  border-radius: 9px;
+  padding: 0.65rem 0.9rem;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.ph-btn:disabled { opacity: 0.6; cursor: default; }
+
+.ph-app { max-width: 720px; margin: 0 auto; padding: 1.5rem; }
+.ph-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.75rem;
+  margin-bottom: 1rem;
+}
+.ph-newprj { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
+.ph-newprj input { flex: 1; }
+
+.ph-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 0.5rem; }
+.ph-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 0.7rem 0.9rem;
+}
+.ph-title { font-weight: 500; }
+.ph-link {
+  background: none;
+  border: 0;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+.ph-link:hover { color: var(--err); }
