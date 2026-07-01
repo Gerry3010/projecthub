@@ -37,6 +37,7 @@ import (
 	"github.com/Gerry3010/projecthub/internal/core/pbclient"
 	"github.com/Gerry3010/projecthub/internal/core/store"
 	"github.com/Gerry3010/projecthub/internal/local"
+	"github.com/Gerry3010/projecthub/internal/pipepush"
 	"github.com/Gerry3010/projecthub/internal/tabsession"
 )
 
@@ -86,14 +87,15 @@ type Model struct {
 	dcursor int
 }
 
-// detailItem is a unified row in the project detail view: a tab set (restorable)
-// or a pinned path (openable).
+// detailItem is a unified row in the project detail view: a tab set (restorable),
+// a pinned path (openable), or a Claude Code session (resumable).
 type detailItem struct {
-	kind  domain.Kind
-	id    string
-	label string
-	tabs  []domain.Tab      // for tab sets
-	pin   domain.PinnedItem // for pins
+	kind    domain.Kind
+	id      string
+	label   string
+	tabs    []domain.Tab        // for tab sets
+	pin     domain.PinnedItem   // for pins
+	session domain.CodeSession  // for Claude Code sessions
 }
 
 // New builds the initial model on the login screen.
@@ -244,6 +246,18 @@ func (m Model) keyProjects(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.busy, m.err, m.status = true, "", ""
 		return m, m.saveFirefoxTabs(m.projects[m.pcursor])
+	case "c":
+		if len(m.projects) == 0 || m.busy {
+			return m, nil
+		}
+		m.busy, m.err, m.status = true, "", ""
+		return m, m.saveClaudeSessions(m.projects[m.pcursor])
+	case "p":
+		if len(m.projects) == 0 || m.busy {
+			return m, nil
+		}
+		m.busy, m.err, m.status = true, "", ""
+		return m, m.pingPipepush(m.projects[m.pcursor])
 	}
 	return m, nil
 }
@@ -333,6 +347,71 @@ func (m Model) saveFirefoxTabs(p domain.ProjectRef) tea.Cmd {
 	}
 }
 
+// saveClaudeSessions scans the project's local dir for Claude Code sessions and
+// stores a reference for each one not already saved (dedup by session id).
+func (m Model) saveClaudeSessions(p domain.ProjectRef) tea.Cmd {
+	st := m.store
+	cwd := filepath.Join(m.cfg.IndexRoot, p.Slug)
+	return func() tea.Msg {
+		ctx := context.Background()
+		found, err := tabsession.ScanClaudeSessions(cwd)
+		if err != nil {
+			return errMsg{err}
+		}
+		if len(found) == 0 {
+			return errMsg{fmt.Errorf("keine Claude-Code-Sessions für %s gefunden", cwd)}
+		}
+		existing, err := st.ListCodeSessions(ctx, p.FolderID)
+		if err != nil {
+			return errMsg{err}
+		}
+		have := make(map[string]bool, len(existing))
+		for _, e := range existing {
+			have[e.Val.SessionID] = true
+		}
+		saved := 0
+		for _, cs := range found {
+			if have[cs.SessionID] {
+				continue
+			}
+			if _, err := st.CreateCodeSession(ctx, p.FolderID, cs); err != nil {
+				return errMsg{err}
+			}
+			saved++
+		}
+		return statusMsg{fmt.Sprintf("%d neue Claude-Session(s) gespeichert (%d insgesamt)", saved, len(found))}
+	}
+}
+
+// pingPipepush sends a status webhook to the project's linked pipepush project,
+// proving the integration end-to-end. Does nothing if no link is set.
+func (m Model) pingPipepush(p domain.ProjectRef) tea.Cmd {
+	st := m.store
+	return func() tea.Msg {
+		ctx := context.Background()
+		link, err := st.GetPipepushLink(ctx, p.FolderID)
+		if err != nil {
+			return errMsg{err}
+		}
+		if link == nil {
+			return errMsg{fmt.Errorf("kein pipepush-Link für %q (im Web verknüpfen)", p.Title)}
+		}
+		if link.Val.Token == "" {
+			return errMsg{fmt.Errorf("pipepush-Link ohne Token — Webhook nicht möglich")}
+		}
+		req := pipepush.WebhookRequest{
+			Token:    link.Val.Token,
+			Status:   pipepush.StatusRunning,
+			Pipeline: link.Val.Pipeline,
+			Message:  "Ping von ProjectHub: " + p.Title,
+		}
+		if err := pipepush.SendWebhook(ctx, link.Val.BaseURL, req); err != nil {
+			return errMsg{err}
+		}
+		return statusMsg{"pipepush-Webhook gesendet an " + link.Val.BaseURL}
+	}
+}
+
 func (m Model) loadDetail(p domain.ProjectRef) tea.Cmd {
 	st := m.store
 	return func() tea.Msg {
@@ -345,6 +424,10 @@ func (m Model) loadDetail(p domain.ProjectRef) tea.Cmd {
 		if err != nil {
 			return errMsg{err}
 		}
+		sessions, err := st.ListCodeSessions(ctx, p.FolderID)
+		if err != nil {
+			return errMsg{err}
+		}
 		var items []detailItem
 		for _, ts := range tabsets {
 			items = append(items, detailItem{
@@ -352,6 +435,14 @@ func (m Model) loadDetail(p domain.ProjectRef) tea.Cmd {
 				id:    ts.ID,
 				label: fmt.Sprintf("[Tab-Set] %s (%d Tabs)", orDash(ts.Val.Title), len(ts.Val.Tabs)),
 				tabs:  ts.Val.Tabs,
+			})
+		}
+		for _, cs := range sessions {
+			items = append(items, detailItem{
+				kind:    domain.KindCodeSession,
+				id:      cs.ID,
+				label:   fmt.Sprintf("[Claude]  %s (%s)", orDash(cs.Val.Title), cs.Val.LastActive.Format("2006-01-02 15:04")),
+				session: cs.Val,
 			})
 		}
 		for _, pin := range pins {
@@ -376,6 +467,15 @@ func (m Model) activate(it detailItem) tea.Cmd {
 				return errMsg{err}
 			}
 			return statusMsg{fmt.Sprintf("%d Tabs geöffnet", len(it.tabs))}
+		case domain.KindCodeSession:
+			cwd := it.session.Cwd
+			if cwd == "" {
+				cwd = filepath.Join(idxRoot, slug)
+			}
+			if err := local.ResumeClaudeSession(cwd, it.session.SessionID); err != nil {
+				return errMsg{err}
+			}
+			return statusMsg{"Claude-Session fortgesetzt: " + orDash(it.session.Title)}
 		case domain.KindPin:
 			abs := filepath.Join(idxRoot, slug, it.pin.RelPath)
 			if err := local.OpenPath(abs); err != nil {
@@ -422,19 +522,19 @@ func (m Model) viewProjects() string {
 	for i, p := range m.projects {
 		s += renderRow(i == m.pcursor, p.Title) + "\n"
 	}
-	s += "\n" + m.footer("↑/↓: wählen · enter: öffnen · s: Firefox-Tabs speichern · q: beenden")
+	s += "\n" + m.footer("↑/↓: wählen · enter: öffnen · s: Firefox-Tabs · c: Claude-Sessions · p: pipepush-Ping · q: beenden")
 	return s
 }
 
 func (m Model) viewProject() string {
 	s := titleStyle.Render(m.current.Title) + mutedStyle.Render("  /"+m.current.Slug) + "\n\n"
 	if len(m.items) == 0 {
-		s += mutedStyle.Render("Keine Tab-Sets oder Pfade. Mit 's' auf der Projektliste Tabs speichern.") + "\n"
+		s += mutedStyle.Render("Nichts gespeichert. Auf der Projektliste: 's' Firefox-Tabs, 'c' Claude-Sessions.") + "\n"
 	}
 	for i, it := range m.items {
 		s += renderRow(i == m.dcursor, it.label) + "\n"
 	}
-	s += "\n" + m.footer("↑/↓: wählen · enter: Tab-Set wiederherstellen / Pfad öffnen · esc: zurück")
+	s += "\n" + m.footer("↑/↓: wählen · enter: Tab-Set / Claude-Session / Pfad aktivieren · esc: zurück")
 	return s
 }
 
