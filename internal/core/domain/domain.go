@@ -24,11 +24,13 @@
 //	__PROJECT_HUB__/                 (root folder, RootFolderName)
 //	├── ph-root        entry: RootIndex   (catalog of projects)
 //	└── <project folder, name=ProjectFolderName>
-//	    ├── ph-manifest entry: Project    (title, description, slug)
-//	    ├── ph-note     entries: NoteDoc
-//	    ├── ph-tabset   entries: TabSet
-//	    ├── ph-pin      entries: PinnedItem
-//	    └── ph-file     entries: FileBlob
+//	    ├── ph-manifest   entry: Project    (title, description, slug)
+//	    ├── ph-note       entries: NoteDoc
+//	    ├── ph-tabset     entries: TabSet
+//	    ├── ph-pin        entries: PinnedItem
+//	    ├── ph-file       entries: FileBlob
+//	    ├── ph-ccsession  entries: CodeSession   (Claude Code session references)
+//	    └── ph-pipepush   entry:   PipepushLink  (at most one per project)
 package domain
 
 import "time"
@@ -50,6 +52,9 @@ const (
 	KindTabSet   Kind = "ph-tabset"
 	KindPin      Kind = "ph-pin"
 	KindFile     Kind = "ph-file"
+
+	KindCodeSession  Kind = "ph-ccsession" // a Claude Code session reference
+	KindPipepushLink Kind = "ph-pipepush"  // link to a pipepush project (one per project)
 )
 
 // PassbubbleEntryType is the Passbubble `type` we use for all ProjectHub entries.
@@ -112,6 +117,29 @@ type PinnedItem struct {
 	Label   string `json:"label"`
 	RelPath string `json:"rel_path"` // relative to <IndexRoot>/<slug>/
 	IsDir   bool   `json:"is_dir"`
+}
+
+// CodeSession is the decrypted ph-ccsession payload: a reference to a Claude Code
+// session so it can be resumed later. Claude Code persists each session as
+// <sessionId>.jsonl under ~/.claude/projects/<cwd-as-dashes>/; resuming means
+// running `claude --resume <SessionID>` in the original working directory.
+type CodeSession struct {
+	SessionID  string    `json:"session_id"` // == <sessionId>.jsonl filename (Claude Code session id)
+	Title      string    `json:"title"`      // ai-title from the transcript, else first user prompt
+	Cwd        string    `json:"cwd"`        // working dir the session ran in (used for --resume)
+	LastActive time.Time `json:"last_active"`
+}
+
+// PipepushLink is the decrypted ph-pipepush payload: it couples a ProjectHub
+// project to a pipepush project plus a webhook token. The token is secret but,
+// like every payload, encrypted at rest in Passbubble. At most one per project.
+type PipepushLink struct {
+	BaseURL   string    `json:"base_url"`           // e.g. https://pipepush.geraldhofbauer.net
+	ProjectID string    `json:"project_id"`         // pipepush project UUID
+	Label     string    `json:"label,omitempty"`    // human label for the link
+	Token     string    `json:"token,omitempty"`    // pp_… notification token for POST /api/webhook
+	Pipeline  string    `json:"pipeline,omitempty"` // routing name (project-scoped tokens fan out by pipeline)
+	LinkedAt  time.Time `json:"linked_at"`
 }
 
 // FileBlob is the decrypted ph-file payload: an uploaded file stored inline. Keep

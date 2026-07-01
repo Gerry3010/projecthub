@@ -72,6 +72,43 @@ func (s *Store) ListPins(ctx context.Context, projectFolderID string) ([]Item[do
 	return listItems[domain.PinnedItem](ctx, s, projectFolderID, domain.KindPin)
 }
 
+// ─── Claude Code sessions ─────────────────────────────────────────────────────
+
+func (s *Store) CreateCodeSession(ctx context.Context, projectFolderID string, cs domain.CodeSession) (string, error) {
+	return s.putEntry(ctx, &projectFolderID, domain.KindCodeSession, cs)
+}
+
+func (s *Store) ListCodeSessions(ctx context.Context, projectFolderID string) ([]Item[domain.CodeSession], error) {
+	return listItems[domain.CodeSession](ctx, s, projectFolderID, domain.KindCodeSession)
+}
+
+// ─── pipepush link ────────────────────────────────────────────────────────────
+
+// GetPipepushLink returns the project's pipepush link, or nil if none is set.
+func (s *Store) GetPipepushLink(ctx context.Context, projectFolderID string) (*Item[domain.PipepushLink], error) {
+	links, err := listItems[domain.PipepushLink](ctx, s, projectFolderID, domain.KindPipepushLink)
+	if err != nil {
+		return nil, err
+	}
+	if len(links) == 0 {
+		return nil, nil
+	}
+	return &links[0], nil
+}
+
+// SetPipepushLink creates the project's pipepush link, or updates it in place if
+// one already exists. A project links to at most one pipepush project.
+func (s *Store) SetPipepushLink(ctx context.Context, projectFolderID string, l domain.PipepushLink) (string, error) {
+	existing, err := s.GetPipepushLink(ctx, projectFolderID)
+	if err != nil {
+		return "", err
+	}
+	if existing != nil {
+		return existing.ID, s.updateEntry(ctx, existing.ID, &projectFolderID, domain.KindPipepushLink, l)
+	}
+	return s.putEntry(ctx, &projectFolderID, domain.KindPipepushLink, l)
+}
+
 // ─── files ──────────────────────────────────────────────────────────────────
 
 // CreateFile stores an uploaded file inline (encrypted). Keep to small files in
