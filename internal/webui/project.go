@@ -73,8 +73,17 @@ type ProjectPage struct {
 	previewID string
 }
 
+// defaultPipepushBaseURL pre-fills the link form with the production pipepush
+// server; it stays editable for other deployments.
+const defaultPipepushBaseURL = "https://pipepush.geraldhofbauer.net"
+
 // OnMount loads the project's contents once the component is in the DOM.
-func (p *ProjectPage) OnMount(ctx app.Context) { p.reload(ctx, nil) }
+func (p *ProjectPage) OnMount(ctx app.Context) {
+	if p.ppBaseURL == "" {
+		p.ppBaseURL = defaultPipepushBaseURL
+	}
+	p.reload(ctx, nil)
+}
 
 func (p *ProjectPage) Render() app.UI {
 	return app.Div().Class("ph-app").Body(
@@ -381,7 +390,10 @@ func (p *ProjectPage) savePipepushLink(ctx app.Context, _ app.Event) {
 	p.runThen(ctx, func() error {
 		_, err := p.Store.SetPipepushLink(context.Background(), p.Ref.FolderID, link)
 		return err
-	}, func() { p.ppBaseURL, p.ppProjectID, p.ppLabel, p.ppToken, p.ppPipeline = "", "", "", "", "" })
+	}, func() {
+		p.ppProjectID, p.ppLabel, p.ppToken, p.ppPipeline = "", "", "", ""
+		p.ppBaseURL = defaultPipepushBaseURL // keep the default ready if the link is later removed
+	})
 }
 
 func (p *ProjectPage) addTabSet(ctx app.Context, _ app.Event) {
