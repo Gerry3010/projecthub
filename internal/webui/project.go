@@ -41,10 +41,19 @@ type ProjectPage struct {
 	busy   bool
 	status string
 
-	notes   []store.Note
-	tabsets []store.Item[domain.TabSet]
-	pins    []store.Item[domain.PinnedItem]
-	files   []store.Item[domain.FileBlob]
+	notes    []store.Note
+	tabsets  []store.Item[domain.TabSet]
+	pins     []store.Item[domain.PinnedItem]
+	files    []store.Item[domain.FileBlob]
+	sessions []store.Item[domain.CodeSession]
+	ppLink   *store.Item[domain.PipepushLink]
+
+	// pipepush link form
+	ppBaseURL   string
+	ppProjectID string
+	ppLabel     string
+	ppToken     string
+	ppPipeline  string
 
 	// note form (doubles as editor when editNoteID != "")
 	newNoteTitle string
@@ -64,8 +73,17 @@ type ProjectPage struct {
 	previewID string
 }
 
+// defaultPipepushBaseURL pre-fills the link form with the production pipepush
+// server; it stays editable for other deployments.
+const defaultPipepushBaseURL = "https://pipepush.geraldhofbauer.net"
+
 // OnMount loads the project's contents once the component is in the DOM.
-func (p *ProjectPage) OnMount(ctx app.Context) { p.reload(ctx, nil) }
+func (p *ProjectPage) OnMount(ctx app.Context) {
+	if p.ppBaseURL == "" {
+		p.ppBaseURL = defaultPipepushBaseURL
+	}
+	p.reload(ctx, nil)
+}
 
 func (p *ProjectPage) Render() app.UI {
 	return app.Div().Class("ph-app").Body(
@@ -87,7 +105,9 @@ func (p *ProjectPage) Render() app.UI {
 					p.notesSection(),
 					p.filesSection(),
 					p.tabsetsSection(),
+					p.codeSessionsSection(),
 					p.pinsSection(),
+					p.pipepushSection(),
 				)
 			}),
 	)
@@ -289,6 +309,93 @@ func (p *ProjectPage) pinsSection() app.UI {
 	)
 }
 
+// ─── Claude Code sessions (read-only) ─────────────────────────────────────────
+
+// codeSessionsSection lists the Claude Code sessions captured for this project.
+// Capture and resume are TUI-only (they need local file/process access), so the
+// web view is read-only.
+func (p *ProjectPage) codeSessionsSection() app.UI {
+	return app.Section().Class("ph-section").Body(
+		app.H2().Text("Claude-Code-Sessions"),
+		app.P().Class("ph-muted").Text("Vom TUI-Companion erfasst; Fortsetzen ('claude --resume') nur dort möglich."),
+		app.Ul().Class("ph-list").Body(
+			app.Range(p.sessions).Slice(func(i int) app.UI {
+				cs := p.sessions[i]
+				return app.Li().Class("ph-item").Body(
+					app.Div().Body(
+						app.Strong().Text(orDash(cs.Val.Title)),
+						app.Span().Class("ph-muted").Text(fmt.Sprintf("  %s · %s", cs.Val.LastActive.Format("2006-01-02 15:04"), orDash(cs.Val.Cwd))),
+					),
+					app.Button().Class("ph-link").Text("löschen").OnClick(func(ctx app.Context, _ app.Event) {
+						p.run(ctx, func() error { return p.Store.DeleteItem(context.Background(), cs.ID) })
+					}),
+				)
+			}),
+			app.If(len(p.sessions) == 0, func() app.UI { return app.Li().Class("ph-muted").Text("Keine Sessions erfasst.") }),
+		),
+	)
+}
+
+// ─── pipepush link ────────────────────────────────────────────────────────────
+
+// pipepushSection links this project to a pipepush project (base URL + project id
+// + optional webhook token). Status webhooks are fired from the TUI companion.
+func (p *ProjectPage) pipepushSection() app.UI {
+	return app.Section().Class("ph-section").Body(
+		app.H2().Text("pipepush"),
+		app.P().Class("ph-muted").Text("Ordne dieses Projekt einem pipepush-Projekt zu. Der Token bleibt Ende-zu-Ende verschlüsselt gespeichert."),
+		app.If(p.ppLink != nil, func() app.UI {
+			l := p.ppLink.Val
+			return app.Div().Class("ph-item").Body(
+				app.Div().Body(
+					app.Strong().Text(orDash(l.Label)),
+					app.Span().Class("ph-muted").Text("  "+l.BaseURL+" · "+l.ProjectID),
+				),
+				app.Div().Body(
+					app.A().Class("ph-link").Href(pipepushURL(l)).Target("_blank").Text("in pipepush öffnen"),
+					app.Button().Class("ph-link").Text("entfernen").OnClick(func(ctx app.Context, _ app.Event) {
+						p.run(ctx, func() error { return p.Store.DeleteItem(context.Background(), p.ppLink.ID) })
+					}),
+				),
+			)
+		}).Else(func() app.UI {
+			return app.Div().Class("ph-noteform").Body(
+				app.Input().Type("text").Placeholder("Base-URL (https://pipepush.…)").Value(p.ppBaseURL).OnInput(bindInput(&p.ppBaseURL)),
+				app.Input().Type("text").Placeholder("pipepush-Projekt-UUID").Value(p.ppProjectID).OnInput(bindInput(&p.ppProjectID)),
+				app.Input().Type("text").Placeholder("Label (optional)").Value(p.ppLabel).OnInput(bindInput(&p.ppLabel)),
+				app.Input().Type("text").Placeholder("Pipeline-Name (optional)").Value(p.ppPipeline).OnInput(bindInput(&p.ppPipeline)),
+				app.Input().Type("password").Placeholder("Webhook-Token pp_… (optional)").Value(p.ppToken).OnInput(bindInput(&p.ppToken)),
+				app.Button().Class("ph-btn").Disabled(p.busy).Text("Verknüpfen").OnClick(p.savePipepushLink),
+			)
+		}),
+	)
+}
+
+func (p *ProjectPage) savePipepushLink(ctx app.Context, _ app.Event) {
+	if p.busy {
+		return
+	}
+	if strings.TrimSpace(p.ppBaseURL) == "" || strings.TrimSpace(p.ppProjectID) == "" {
+		p.fail(ctx, "Base-URL und Projekt-UUID sind erforderlich")
+		return
+	}
+	link := domain.PipepushLink{
+		BaseURL:   strings.TrimSpace(p.ppBaseURL),
+		ProjectID: strings.TrimSpace(p.ppProjectID),
+		Label:     p.ppLabel,
+		Token:     strings.TrimSpace(p.ppToken),
+		Pipeline:  strings.TrimSpace(p.ppPipeline),
+		LinkedAt:  time.Now(),
+	}
+	p.runThen(ctx, func() error {
+		_, err := p.Store.SetPipepushLink(context.Background(), p.Ref.FolderID, link)
+		return err
+	}, func() {
+		p.ppProjectID, p.ppLabel, p.ppToken, p.ppPipeline = "", "", "", ""
+		p.ppBaseURL = defaultPipepushBaseURL // keep the default ready if the link is later removed
+	})
+}
+
 func (p *ProjectPage) addTabSet(ctx app.Context, _ app.Event) {
 	if p.busy {
 		return
@@ -372,9 +479,20 @@ func (p *ProjectPage) reload(ctx app.Context, after func()) {
 		p.fail(ctx, "Pins: "+err.Error())
 		return
 	}
+	sessions, err := p.Store.ListCodeSessions(bg, folder)
+	if err != nil {
+		p.fail(ctx, "Sessions: "+err.Error())
+		return
+	}
+	ppLink, err := p.Store.GetPipepushLink(bg, folder)
+	if err != nil {
+		p.fail(ctx, "pipepush: "+err.Error())
+		return
+	}
 
 	ctx.Dispatch(func(ctx app.Context) {
 		p.notes, p.files, p.tabsets, p.pins = notes, files, tabsets, pins
+		p.sessions, p.ppLink = sessions, ppLink
 		p.loaded, p.busy = true, false
 		if after != nil {
 			after()
@@ -468,6 +586,13 @@ func humanSize(n int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+// pipepushURL builds a best-effort deep link into pipepush. pipepush serves its
+// web UI at the root; if it later exposes a per-project route this is the single
+// place to refine.
+func pipepushURL(l domain.PipepushLink) string {
+	return strings.TrimRight(l.BaseURL, "/") + "/"
 }
 
 func orDash(s string) string {
