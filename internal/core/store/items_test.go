@@ -26,7 +26,7 @@ import (
 func TestTabSetsPinsFiles(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
-	p, err := s.CreateProject(ctx, "Items", "")
+	p, err := s.CreateProject(ctx, "Items", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

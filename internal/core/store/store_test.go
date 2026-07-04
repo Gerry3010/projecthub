@@ -168,7 +168,7 @@ func TestProjectLifecycle(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 
-	p, err := s.CreateProject(ctx, "Mein SECRET Projekt", "geheime Beschreibung")
+	p, err := s.CreateProject(ctx, "Mein SECRET Projekt", "geheime Beschreibung", "")
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
@@ -203,7 +203,7 @@ func TestProjectLifecycle(t *testing.T) {
 func TestNotesRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
-	p, err := s.CreateProject(ctx, "Notes", "")
+	p, err := s.CreateProject(ctx, "Notes", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

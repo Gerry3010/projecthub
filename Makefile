@@ -3,7 +3,7 @@
 PASSBUBBLE_URL ?= http://localhost:8080
 PORT           ?= 8090
 
-.PHONY: all wasm server run tui test vet build clean
+.PHONY: all wasm server sidecar run tui test vet build clean
 
 all: build
 
@@ -15,12 +15,16 @@ wasm:
 server:
 	go build -o build/server ./cmd/server
 
+## sidecar: build the Electron desktop sidecar daemon → build/phd
+sidecar:
+	go build -o build/phd ./cmd/phd
+
 ## tui: build the TUI companion → build/tui (placeholder until implemented)
 tui:
 	go build -o build/tui ./cmd/tui
 
-## build: wasm frontend + server + tui
-build: wasm server
+## build: wasm frontend + server + sidecar
+build: wasm server sidecar
 
 ## run: build the wasm frontend, then run the server (serves on $(PORT))
 run: wasm

@@ -1,0 +1,18 @@
+{
+  "name": "projecthub-desktop",
+  "version": "0.1.0",
+  "description": "ProjectHub desktop shell (Electron) — hosts the go-app WASM UI and supervises the Go sidecar.",
+  "license": "AGPL-3.0-or-later",
+  "author": "Gerald Hofbauer <info@geraldhofbauer.net>",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "npm run build && electron .",
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "electron": "^33.2.0",
+    "typescript": "^5.7.0"
+  }
+}

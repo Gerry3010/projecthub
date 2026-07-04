@@ -37,10 +37,18 @@ type Config struct {
 	// WebHandler serves the frontend (the go-app handler, or a static file server
 	// during development). Mounted at "/".
 	WebHandler http.Handler
+	// NativeHandler, when set, is mounted at /native/* — the Electron desktop app's
+	// local-machine API (filesystem, PTY, Claude scans). It MUST carry its own auth;
+	// this package does not add it. Nil for the plain hosted web deployment.
+	NativeHandler http.Handler
+	// Embedded loosens the CSP for the Electron shell: the renderer is served from
+	// this same loopback origin and must open WebSockets to it (the PTY stream). It
+	// stays strict otherwise. Leave false for the hosted browser deployment.
+	Embedded bool
 }
 
 // New builds the chi router: security headers, the /pb reverse proxy, a health
-// check, and the web frontend.
+// check, the optional native API, and the web frontend.
 func New(cfg Config) (http.Handler, error) {
 	upstream, err := url.Parse(cfg.PassbubbleURL)
 	if err != nil {
@@ -60,7 +68,7 @@ func New(cfg Config) (http.Handler, error) {
 	// size; the on-disk/in-memory wasm stays large. Further size wins (TinyGo,
 	// brotli, code-splitting) are tracked separately.
 	r.Use(middleware.Compress(5, "application/wasm", "application/javascript", "text/css", "text/html", "image/svg+xml"))
-	r.Use(securityHeaders)
+	r.Use(securityHeaders(cfg.Embedded))
 
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -68,6 +76,11 @@ func New(cfg Config) (http.Handler, error) {
 	})
 
 	r.Handle("/pb/*", pbProxy(upstream))
+
+	if cfg.NativeHandler != nil {
+		// Mount strips the /native prefix so the subrouter registers clean paths.
+		r.Mount("/native", cfg.NativeHandler)
+	}
 
 	if cfg.WebHandler != nil {
 		r.Handle("/*", cfg.WebHandler)
@@ -92,25 +105,34 @@ func pbProxy(upstream *url.URL) http.Handler {
 	return http.StripPrefix("", proxy) // path rewrite handled in Director
 }
 
-// securityHeaders applies a strict, E2E-appropriate security policy. Because all
-// secrets live in the browser's WASM heap, an XSS would be catastrophic — hence a
-// tight CSP. 'wasm-unsafe-eval' is required to instantiate the WebAssembly module.
-func securityHeaders(next http.Handler) http.Handler {
-	const csp = "default-src 'self'; " +
+// securityHeaders returns middleware applying a strict, E2E-appropriate security
+// policy. Because all secrets live in the browser's WASM heap, an XSS would be
+// catastrophic — hence a tight CSP. 'wasm-unsafe-eval' is required to instantiate
+// the WebAssembly module. When embedded (Electron shell), connect-src also allows
+// WebSockets to the loopback origin so the renderer can attach to the PTY stream;
+// nothing else is loosened.
+func securityHeaders(embedded bool) func(http.Handler) http.Handler {
+	connectSrc := "connect-src 'self'"
+	if embedded {
+		connectSrc += " ws://127.0.0.1:* wss://127.0.0.1:*"
+	}
+	csp := "default-src 'self'; " +
 		"script-src 'self' 'wasm-unsafe-eval'; " +
 		"style-src 'self' 'unsafe-inline'; " +
 		"img-src 'self' data:; " +
-		"connect-src 'self'; " +
+		connectSrc + "; " +
 		"object-src 'none'; " +
 		"base-uri 'none'; " +
 		"frame-ancestors 'none'"
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		h := w.Header()
-		h.Set("Content-Security-Policy", csp)
-		h.Set("X-Content-Type-Options", "nosniff")
-		h.Set("Referrer-Policy", "no-referrer")
-		h.Set("X-Frame-Options", "DENY")
-		h.Set("Cross-Origin-Opener-Policy", "same-origin")
-		next.ServeHTTP(w, r)
-	})
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			h := w.Header()
+			h.Set("Content-Security-Policy", csp)
+			h.Set("X-Content-Type-Options", "nosniff")
+			h.Set("Referrer-Policy", "no-referrer")
+			h.Set("X-Frame-Options", "DENY")
+			h.Set("Cross-Origin-Opener-Policy", "same-origin")
+			next.ServeHTTP(w, r)
+		})
+	}
 }

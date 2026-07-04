@@ -56,17 +56,28 @@ func RestoreTabs(tabs []domain.Tab) error {
 	return firstErr
 }
 
+// ResumeCommand returns the command + args that resume a Claude Code session,
+// without spawning anything. The embedded terminal (Go PTY host) starts this
+// inside its own pane; the external-terminal path below wraps the same command.
+// Keeping it a pure function means both paths agree on exactly how a resume runs.
+func ResumeCommand(sessionID string) (name string, args []string) {
+	return "claude", []string{"--resume", sessionID}
+}
+
 // ResumeClaudeSession opens a new terminal window that resumes a Claude Code
 // session (`claude --resume <sessionID>`) in its original working directory.
 // Unlike a URL/path, `claude` is an interactive TUI, so it needs a terminal to
 // host it — chosen via PROJECTHUB_TERMINAL or the first available candidate.
+// This external-terminal path is used by the headless TUI companion; the Electron
+// app instead runs ResumeCommand inside an embedded PTY (internal/ptyhost).
 func ResumeClaudeSession(cwd, sessionID string) error {
 	term := pickTerminal()
 	if term == "" {
 		return fmt.Errorf("no terminal emulator found; set PROJECTHUB_TERMINAL to one (tried %v)", terminalCandidates)
 	}
+	name, args := ResumeCommand(sessionID)
 	// The `-e` convention is honoured by every candidate terminal above.
-	cmd := exec.Command(term, "-e", "claude", "--resume", sessionID)
+	cmd := exec.Command(term, append([]string{"-e", name}, args...)...)
 	cmd.Dir = cwd
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("launch %s: %w", term, err)

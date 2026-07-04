@@ -221,7 +221,9 @@ func (s *Store) ListProjects(ctx context.Context) ([]domain.ProjectRef, error) {
 
 // CreateProject creates a project: a Passbubble subfolder under __PROJECT_HUB__,
 // a ph-manifest entry, and a new RootIndex entry. Returns the created project.
-func (s *Store) CreateProject(ctx context.Context, title, description string) (*domain.Project, error) {
+// localPath is the project's real working directory on this machine (e.g. a Claude
+// Code cwd); pass "" to use the legacy <IndexRoot>/<slug> convention.
+func (s *Store) CreateProject(ctx context.Context, title, description, localPath string) (*domain.Project, error) {
 	root, err := s.EnsureRoot(ctx)
 	if err != nil {
 		return nil, err
@@ -243,6 +245,7 @@ func (s *Store) CreateProject(ctx context.Context, title, description string) (*
 		Title:       title,
 		Description: description,
 		Slug:        uniqueSlug(title, idx.Projects),
+		LocalPath:   localPath,
 		CreatedAt:   time.Now(),
 	}
 	if _, err := s.putEntry(ctx, &folderID, domain.KindManifest, p); err != nil {
@@ -250,7 +253,7 @@ func (s *Store) CreateProject(ctx context.Context, title, description string) (*
 	}
 
 	idx.Projects = append(idx.Projects, domain.ProjectRef{
-		ID: p.ID, FolderID: folderID, Title: p.Title, Slug: p.Slug,
+		ID: p.ID, FolderID: folderID, Title: p.Title, Slug: p.Slug, LocalPath: p.LocalPath,
 	})
 	if err := s.saveIndex(ctx, idx); err != nil {
 		return nil, err

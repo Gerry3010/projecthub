@@ -33,7 +33,10 @@
 //	    └── ph-pipepush   entry:   PipepushLink  (at most one per project)
 package domain
 
-import "time"
+import (
+	"path/filepath"
+	"time"
+)
 
 // Structural folder names (cleartext, server-visible — not user content).
 const (
@@ -76,6 +79,23 @@ type ProjectRef struct {
 	FolderID string `json:"folder_id"` // Passbubble folder id of the project folder
 	Title    string `json:"title"`
 	Slug     string `json:"slug"` // filesystem-safe; mirrors to <IndexRoot>/<slug>/
+	// LocalPath is the project's real working directory on this machine (e.g. the
+	// Claude Code cwd it was created from). When empty, the local dir falls back to
+	// the legacy <IndexRoot>/<slug> convention — see Cwd. Mirrored from Project so
+	// the list view resolves paths without decrypting every manifest. It lives in
+	// the encrypted payload, so it stays private; it is machine-specific, so multi-
+	// device path handling is future work.
+	LocalPath string `json:"local_path,omitempty"`
+}
+
+// Cwd resolves the project's local working directory: LocalPath if set, else the
+// legacy <indexRoot>/<slug> convention. This is the single resolution both the TUI
+// and the sidecar use so old (path-less) and new projects behave consistently.
+func (r ProjectRef) Cwd(indexRoot string) string {
+	if r.LocalPath != "" {
+		return r.LocalPath
+	}
+	return filepath.Join(indexRoot, r.Slug)
 }
 
 // Project is the decrypted ph-manifest payload.
@@ -84,6 +104,7 @@ type Project struct {
 	Title       string    `json:"title"`
 	Description string    `json:"description,omitempty"`
 	Slug        string    `json:"slug"`
+	LocalPath   string    `json:"local_path,omitempty"` // real cwd on this machine; see ProjectRef.Cwd
 	CreatedAt   time.Time `json:"created_at"`
 }
 

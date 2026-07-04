@@ -2,6 +2,10 @@
 /build/
 /web/app.wasm
 
+# electron desktop shell (deps + compiled output)
+/app/node_modules/
+/app/dist/
+
 # go workspace (dev-only; depends on a local Passbubble checkout next door)
 go.work
 go.work.sum

@@ -23,6 +23,8 @@ package webui
 import (
 	"context"
 	"encoding/base64"
+	"path"
+	"strconv"
 
 	"github.com/maxence-charriere/go-app/v10/pkg/app"
 
@@ -30,6 +32,7 @@ import (
 	"github.com/Gerry3010/projecthub/internal/core/domain"
 	"github.com/Gerry3010/projecthub/internal/core/pbclient"
 	"github.com/Gerry3010/projecthub/internal/core/store"
+	"github.com/Gerry3010/projecthub/internal/native/nativeclient"
 )
 
 // apiBase is the same-origin reverse-proxy prefix the chi server exposes for the
@@ -52,6 +55,10 @@ type Root struct {
 	store    *store.Store
 	projects []domain.ProjectRef
 	selected *domain.ProjectRef // non-nil → showing a project's detail page
+
+	// desktop (Electron) integration: nil in the hosted browser build
+	native      *nativeclient.Client
+	suggestions []nativeclient.ClaudeSuggestion // Claude Code dirs not yet added as projects
 
 	// new-project form
 	newTitle string
@@ -145,12 +152,26 @@ func (r *Root) login(ctx app.Context, _ app.Event) {
 			return
 		}
 
+		// Under the Electron shell, offer recently-active Claude Code dirs that
+		// aren't projects yet. In the hosted browser build phNative is undefined,
+		// so nc is nil and no suggestions appear.
+		base, token := readPhNative()
+		nc := nativeclient.New(base, token)
+		var suggestions []nativeclient.ClaudeSuggestion
+		if nc.Available() {
+			if sug, err := nc.Suggestions(context.Background()); err == nil {
+				suggestions = filterAdded(sug, projects)
+			}
+		}
+
 		ctx.Dispatch(func(ctx app.Context) {
 			r.busy = false
 			r.unlocked = true
 			r.password = "" // drop the plaintext password from component state
 			r.store = st
 			r.projects = projects
+			r.native = nc
+			r.suggestions = suggestions
 		})
 	})
 }
@@ -182,7 +203,50 @@ func (r *Root) projectsView() app.UI {
 				return app.Li().Class("ph-muted").Text("Noch keine Projekte.")
 			}),
 		),
+		r.suggestionsView(),
 	)
+}
+
+// suggestionsView renders "add this project?" cards for recently-active Claude Code
+// working dirs (desktop shell only; empty in the hosted browser build).
+func (r *Root) suggestionsView() app.UI {
+	if len(r.suggestions) == 0 {
+		return app.Div()
+	}
+	return app.Div().Class("ph-suggest").Body(
+		app.H2().Class("ph-suggest-h").Text("Aus Claude Code hinzufügen"),
+		app.Ul().Class("ph-list").Body(
+			app.Range(r.suggestions).Slice(func(i int) app.UI {
+				s := r.suggestions[i]
+				return app.Li().Class("ph-item ph-suggest-item").Body(
+					app.Div().Class("ph-suggest-info").Body(
+						app.Span().Class("ph-title").Text(suggestionTitle(s)),
+						app.Span().Class("ph-muted ph-suggest-path").Text(s.Cwd),
+						app.Span().Class("ph-muted").Text(sessionCountLabel(s.SessionCount)),
+					),
+					app.Button().Class("ph-btn").Disabled(r.busy).Text("+ Projekt").
+						OnClick(r.addSuggestion(s)),
+				)
+			}),
+		),
+	)
+}
+
+// addSuggestion creates a project bound to the Claude Code working dir.
+func (r *Root) addSuggestion(s nativeclient.ClaudeSuggestion) app.EventHandler {
+	return func(ctx app.Context, _ app.Event) {
+		if r.busy {
+			return
+		}
+		r.busy, r.status = true, ""
+		ctx.Async(func() {
+			if _, err := r.store.CreateProject(context.Background(), suggestionTitle(s), "", s.Cwd); err != nil {
+				r.fail(ctx, "Anlegen fehlgeschlagen: "+err.Error())
+				return
+			}
+			r.reload(ctx, nil)
+		})
+	}
 }
 
 func (r *Root) createProject(ctx app.Context, _ app.Event) {
@@ -192,7 +256,7 @@ func (r *Root) createProject(ctx app.Context, _ app.Event) {
 	}
 	r.busy, r.status = true, ""
 	ctx.Async(func() {
-		if _, err := r.store.CreateProject(context.Background(), title, ""); err != nil {
+		if _, err := r.store.CreateProject(context.Background(), title, "", ""); err != nil {
 			r.fail(ctx, "Anlegen fehlgeschlagen: "+err.Error())
 			return
 		}
@@ -226,8 +290,57 @@ func (r *Root) reload(ctx app.Context, mutate func()) {
 			mutate()
 		}
 		r.projects = projects
+		// A project just added from a suggestion now has a LocalPath, so re-filter to
+		// drop it from the offered list.
+		r.suggestions = filterAdded(r.suggestions, projects)
 		r.busy = false
 	})
+}
+
+// ─── Claude Code suggestions (desktop shell) ─────────────────────────────────
+
+// readPhNative reads the sidecar base URL + bearer token the Electron preload
+// injects as window.phNative. Both are empty in the hosted browser build.
+func readPhNative() (base, token string) {
+	pn := app.Window().Get("phNative")
+	if !pn.Truthy() {
+		return "", ""
+	}
+	return pn.Get("base").String(), pn.Get("token").String()
+}
+
+// filterAdded drops suggestions whose cwd is already a project's LocalPath.
+func filterAdded(sug []nativeclient.ClaudeSuggestion, projects []domain.ProjectRef) []nativeclient.ClaudeSuggestion {
+	added := make(map[string]bool, len(projects))
+	for _, p := range projects {
+		if p.LocalPath != "" {
+			added[p.LocalPath] = true
+		}
+	}
+	out := make([]nativeclient.ClaudeSuggestion, 0, len(sug))
+	for _, s := range sug {
+		if !added[s.Cwd] {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// suggestionTitle derives a project title from a suggestion: the working dir's last
+// path segment (the natural project name), falling back to the transcript title.
+func suggestionTitle(s nativeclient.ClaudeSuggestion) string {
+	if base := path.Base(s.Cwd); base != "" && base != "." && base != "/" {
+		return base
+	}
+	return s.Title
+}
+
+// sessionCountLabel renders "N Session(s)".
+func sessionCountLabel(n int) string {
+	if n == 1 {
+		return "1 Session"
+	}
+	return strconv.Itoa(n) + " Sessions"
 }
 
 // ─── helpers ────────────────────────────────────────────────────────────────
