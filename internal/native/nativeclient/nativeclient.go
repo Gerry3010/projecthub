@@ -26,6 +26,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"time"
@@ -99,6 +100,49 @@ func (c *Client) Resume(ctx context.Context, cwd, sessionID string, cols, rows u
 // OpenIn opens a URL ("url") or filesystem path ("path") in the system default app.
 func (c *Client) OpenIn(ctx context.Context, kind, target string) error {
 	return c.post(ctx, "/native/openin", map[string]string{"type": kind, "target": target}, nil)
+}
+
+// LiveGroups returns the tab groups coupled to one project, as reported live by the
+// browser extension(s) through the native-messaging host. Empty when nothing is
+// coupled or no browser is reporting.
+func (c *Client) LiveGroups(ctx context.Context, projectID string) ([]domain.LiveTabGroup, error) {
+	var out []domain.LiveTabGroup
+	if err := c.get(ctx, "/native/tabs?project="+url.QueryEscape(projectID), &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// SetProjects pushes the project roster (id+title only) so the extension popup can
+// list projects to couple tab groups to. Safe to call repeatedly; it replaces the
+// previous roster.
+func (c *Client) SetProjects(ctx context.Context, roster []domain.RosterEntry) error {
+	return c.post(ctx, "/native/projects", roster, nil)
+}
+
+// SendCommand asks the target browser's extension to focus or reopen a tab/group.
+func (c *Client) SendCommand(ctx context.Context, cmd domain.TabCommand) error {
+	return c.post(ctx, "/native/tabs/command", cmd, nil)
+}
+
+// FetchFile reads a local file's bytes + content type via the sidecar (used for local
+// background images, which the WASM UI turns into a data URL).
+func (c *Client) FetchFile(ctx context.Context, path string) (data []byte, contentType string, err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/native/file?path="+url.QueryEscape(path), nil)
+	if err != nil {
+		return nil, "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode >= 300 {
+		return nil, "", fmt.Errorf("fetch file: %s", resp.Status)
+	}
+	data, err = io.ReadAll(resp.Body)
+	return data, resp.Header.Get("Content-Type"), err
 }
 
 // ─── low-level ───────────────────────────────────────────────────────────────

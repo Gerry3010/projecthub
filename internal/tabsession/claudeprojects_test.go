@@ -74,6 +74,39 @@ func TestScanClaudeProjects(t *testing.T) {
 	}
 }
 
+func TestScanClaudeProjectsGitGrouping(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	// A real git repo (monorepo) with the root and a subfolder both used by Claude.
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sub := filepath.Join(repo, "apps", "web")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeSession(t, home, repo, "root",
+		`{"type":"user","sessionId":"root","cwd":"`+repo+`","timestamp":"2026-06-01T09:00:00.000Z","message":{"content":"root work"}}`+"\n")
+	writeSession(t, home, sub, "web",
+		`{"type":"user","sessionId":"web","cwd":"`+sub+`","timestamp":"2026-07-01T09:00:00.000Z","message":{"content":"web work"}}`+"\n")
+
+	got, err := ScanClaudeProjects()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("git subfolders must collapse to the repo root: got %d entries: %+v", len(got), got)
+	}
+	if got[0].Cwd != repo {
+		t.Errorf("grouped Cwd = %q, want repo root %q", got[0].Cwd, repo)
+	}
+	if got[0].SessionCount != 2 {
+		t.Errorf("grouped SessionCount = %d, want 2 (root + subfolder)", got[0].SessionCount)
+	}
+}
+
 func TestScanClaudeProjectsMissingDir(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home) // no ~/.claude/projects at all

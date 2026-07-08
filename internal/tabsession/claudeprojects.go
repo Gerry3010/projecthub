@@ -33,11 +33,14 @@ type ClaudeProject struct {
 }
 
 // ScanClaudeProjects enumerates every ~/.claude/projects/<encoded-cwd> directory and
-// returns one ClaudeProject per directory, newest-first. The real working directory
-// is read from the transcript's cwd field (authoritative) rather than decoded from
-// the dashed directory name, which is lossy: encodeCwd collapses both '/' and '.' to
-// '-' and cannot be reversed. Directories whose cwd cannot be resolved are skipped
-// (we won't suggest a path we can't trust). A missing projects dir is not an error.
+// returns the working dirs Claude Code has been used in, newest-first, collapsed to
+// their project root: cwds inside the same git repository (e.g. a monorepo's
+// steuer-rechner, steuer-rechner/apps/web, …/apps/api) are grouped into one entry at
+// the repo root, with session counts summed and the newest activity kept. The real
+// cwd is read from the transcript's cwd field (authoritative) rather than decoded
+// from the dashed directory name, which is lossy: encodeCwd collapses both '/' and
+// '.' to '-' and cannot be reversed. Dirs whose cwd cannot be resolved are skipped;
+// a missing projects dir is not an error.
 func ScanClaudeProjects() ([]ClaudeProject, error) {
 	base, err := ClaudeProjectsDir()
 	if err != nil {
@@ -51,7 +54,8 @@ func ScanClaudeProjects() ([]ClaudeProject, error) {
 		return nil, err
 	}
 
-	var projects []ClaudeProject
+	// Group per project root so subfolder-cwds of the same repo collapse into one.
+	byRoot := make(map[string]*ClaudeProject)
 	for _, d := range dirs {
 		if !d.IsDir() {
 			continue
@@ -60,12 +64,45 @@ func ScanClaudeProjects() ([]ClaudeProject, error) {
 		if !ok {
 			continue
 		}
-		projects = append(projects, p)
+		root := projectRoot(p.Cwd)
+		if agg, seen := byRoot[root]; seen {
+			agg.SessionCount += p.SessionCount
+			if p.LastActive.After(agg.LastActive) {
+				agg.LastActive = p.LastActive
+				agg.Title = p.Title // keep the newest session's title
+			}
+			continue
+		}
+		pc := p
+		pc.Cwd = root
+		byRoot[root] = &pc
+	}
+
+	projects := make([]ClaudeProject, 0, len(byRoot))
+	for _, p := range byRoot {
+		projects = append(projects, *p)
 	}
 	sort.Slice(projects, func(i, j int) bool {
 		return projects[i].LastActive.After(projects[j].LastActive)
 	})
 	return projects, nil
+}
+
+// projectRoot walks up from cwd to the nearest git repository root (the directory
+// containing a .git entry — a dir for a normal clone, a file for a worktree). It
+// returns cwd unchanged if no repo is found, so non-git dirs stay standalone.
+func projectRoot(cwd string) string {
+	dir := cwd
+	for {
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir { // reached the filesystem root
+			return cwd
+		}
+		dir = parent
+	}
 }
 
 // scanProjectDir resolves one project directory into a ClaudeProject. To stay cheap

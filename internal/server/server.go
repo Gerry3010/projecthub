@@ -113,14 +113,23 @@ func pbProxy(upstream *url.URL) http.Handler {
 // nothing else is loosened.
 func securityHeaders(embedded bool) func(http.Handler) http.Handler {
 	connectSrc := "connect-src 'self'"
+	frameSrc := "frame-src 'none'"
+	imgSrc := "img-src 'self' data:"
 	if embedded {
 		connectSrc += " ws://127.0.0.1:* wss://127.0.0.1:*"
+		// The browser tile is an Electron <webview> loading arbitrary sites; allow it
+		// (its guest content runs in its own process, not with vault access).
+		frameSrc = "frame-src https: http:"
+		// The live-tabs tile shows each open tab's favicon, served from the tab's own
+		// (already-visited) origin. Images can't execute, so this stays safe.
+		imgSrc = "img-src 'self' data: https: http:"
 	}
 	csp := "default-src 'self'; " +
 		"script-src 'self' 'wasm-unsafe-eval'; " +
 		"style-src 'self' 'unsafe-inline'; " +
-		"img-src 'self' data:; " +
+		imgSrc + "; " +
 		connectSrc + "; " +
+		frameSrc + "; " +
 		"object-src 'none'; " +
 		"base-uri 'none'; " +
 		"frame-ancestors 'none'"

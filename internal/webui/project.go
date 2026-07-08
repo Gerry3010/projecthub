@@ -86,17 +86,23 @@ func (p *ProjectPage) OnMount(ctx app.Context) {
 }
 
 func (p *ProjectPage) Render() app.UI {
-	return app.Div().Class("ph-app").Body(
+	return app.Div().Class("ph-app").Style("--accent", p.Ref.AccentColor()).Body(
 		app.Header().Class("ph-header").Body(
-			app.Div().Body(
+			app.Div().Class("ph-headleft").Body(
 				app.Button().Class("ph-link").Text("← Projekte").OnClick(func(ctx app.Context, _ app.Event) {
 					if p.Back != nil {
 						p.Back(ctx)
 					}
 				}),
-				app.H1().Text(p.Ref.Title),
+				app.Div().Class("ph-brand").Body(
+					nexusIcon(p.Ref.AccentColor(), 26),
+					app.H1().Text(p.Ref.Title),
+				),
 			),
-			app.Span().Class("ph-muted").Text("/"+p.Ref.Slug),
+			app.Div().Class("ph-headright").Body(
+				app.Span().Class("ph-muted").Text("/"+p.Ref.Slug),
+				swatchBar(p.Ref.AccentColor(), p.pickColor, p.customColor),
+			),
 		),
 		app.If(p.status != "", func() app.UI { return app.P().Class("ph-err").Text(p.status) }),
 		app.If(!p.loaded, func() app.UI { return app.P().Class("ph-muted").Text("Lädt…") }).
@@ -430,6 +436,40 @@ func (p *ProjectPage) addPin(ctx app.Context, _ app.Event) {
 		_, err := p.Store.CreatePin(context.Background(), p.Ref.FolderID, pin)
 		return err
 	}, func() { p.pinLabel, p.pinRelPath, p.pinIsDir = "", "", false })
+}
+
+// ─── project color ──────────────────────────────────────────────────────────
+
+// pickColor sets this project's accent to a preset swatch and persists it.
+func (p *ProjectPage) pickColor(color string) app.EventHandler {
+	return func(ctx app.Context, _ app.Event) { p.applyColor(ctx, color) }
+}
+
+// customColor handles the native color-well change event.
+func (p *ProjectPage) customColor(ctx app.Context, _ app.Event) {
+	p.applyColor(ctx, ctx.JSSrc().Get("value").String())
+}
+
+// applyColor recolors the page immediately and persists the choice to the manifest
+// and RootIndex mirror in the background. The list view picks up the new color on
+// its next reload (i.e. when navigating back).
+func (p *ProjectPage) applyColor(ctx app.Context, color string) {
+	if p.busy || color == "" || eqColor(color, p.Ref.AccentColor()) {
+		return
+	}
+	p.Ref.Color = color // re-themes the header + icon on the next render
+	id := p.Ref.ID
+	p.busy = true
+	st := p.Store
+	ctx.Async(func() {
+		err := st.SetProjectColor(context.Background(), id, color)
+		ctx.Dispatch(func(ctx app.Context) {
+			p.busy = false
+			if err != nil {
+				p.status = "Farbe speichern fehlgeschlagen: " + err.Error()
+			}
+		})
+	})
 }
 
 // ─── data loading + mutation plumbing ───────────────────────────────────────

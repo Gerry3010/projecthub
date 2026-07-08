@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 
 	"github.com/coder/websocket"
@@ -52,6 +53,18 @@ type OpenRequest struct {
 type session struct {
 	ptmx *os.File
 	cmd  *exec.Cmd
+}
+
+// firstSubprotocol returns the first entry of a comma-separated Sec-WebSocket-Protocol
+// header, trimmed. Empty if none.
+func firstSubprotocol(header string) string {
+	if header == "" {
+		return ""
+	}
+	if i := strings.IndexByte(header, ','); i >= 0 {
+		header = header[:i]
+	}
+	return strings.TrimSpace(header)
 }
 
 // Host owns the live PTY sessions, capped so a runaway renderer can't fork-bomb.
@@ -84,7 +97,11 @@ func (h *Host) Open(req OpenRequest) (string, error) {
 
 	cmd := exec.Command(req.Cmd, req.Args...)
 	cmd.Dir = req.Cwd
-	cmd.Env = append(os.Environ(), req.Env...)
+	env := os.Environ()
+	if os.Getenv("TERM") == "" {
+		env = append(env, "TERM=xterm-256color") // interactive shells/tools expect a TERM
+	}
+	cmd.Env = append(env, req.Env...)
 
 	rows, cols := req.Rows, req.Cols
 	if rows == 0 {
@@ -154,7 +171,14 @@ func (h *Host) ServeWS(w http.ResponseWriter, r *http.Request, id string) error 
 		http.Error(w, "unknown pty session", http.StatusNotFound)
 		return fmt.Errorf("ptyhost: unknown session %q", id)
 	}
-	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{})
+	// Echo the client's requested subprotocol. The browser WebSocket API sends the
+	// bearer token as a subprotocol (it can't set an Authorization header); if the
+	// server doesn't confirm it, Chromium closes the connection immediately.
+	opts := &websocket.AcceptOptions{}
+	if p := firstSubprotocol(r.Header.Get("Sec-WebSocket-Protocol")); p != "" {
+		opts.Subprotocols = []string{p}
+	}
+	c, err := websocket.Accept(w, r, opts)
 	if err != nil {
 		return err
 	}

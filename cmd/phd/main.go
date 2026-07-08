@@ -34,17 +34,23 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/maxence-charriere/go-app/v10/pkg/app"
 
+	"github.com/Gerry3010/projecthub/internal/discovery"
 	"github.com/Gerry3010/projecthub/internal/nativeserver"
+	"github.com/Gerry3010/projecthub/internal/nmhost"
 	"github.com/Gerry3010/projecthub/internal/ptyhost"
 	"github.com/Gerry3010/projecthub/internal/server"
+	"github.com/Gerry3010/projecthub/internal/tabstate"
 	"github.com/Gerry3010/projecthub/internal/webui"
 )
 
@@ -58,6 +64,24 @@ type handshake struct {
 func main() {
 	log.SetFlags(0)
 	log.SetPrefix("phd: ")
+
+	// `phd --install-native-host` installs the browser-extension native-messaging host
+	// manifest and exits — a standalone setup step (also runnable by hand). Normal
+	// launches do the same install best-effort below, so this is rarely needed.
+	if len(os.Args) > 1 && os.Args[1] == "--install-native-host" {
+		written, err := nmhost.InstallDefault()
+		for _, p := range written {
+			log.Printf("installed native-host manifest: %s", p)
+		}
+		if err != nil {
+			log.Fatalf("install native host: %v", err)
+		}
+		if len(written) == 0 {
+			log.Print("no Chromium-family browser found — nothing installed")
+		}
+		return
+	}
+
 	pbURL := env("PASSBUBBLE_URL", "http://localhost:8080")
 
 	// Bind a random loopback port up front so we can announce it in the handshake.
@@ -80,12 +104,16 @@ func main() {
 		Description: "Persönlicher Projekt-Manager mit E2E-Verschlüsselung über Passbubble.",
 		Title:       "ProjectHub",
 		Lang:        "de",
-		Icon:        app.Icon{SVG: "/web/icon.svg"},
-		Styles:      []string{"/web/app.css"},
+		// Default/Large drive the WASM-loading logo; without them go-app points the
+		// loader <img> at an external github URL that our CSP blocks (broken image).
+		Icon:    app.Icon{SVG: "/web/icon.svg", Default: "/web/icon.svg", Large: "/web/icon.svg"},
+		Styles:  []string{"/web/app.css", "/web/shell.css"},
+		Scripts: []string{"/web/shell.js"}, // island layer (xterm/markdown/webview) + divider resize
 	}
 
 	ptys := ptyhost.New(32)
-	native := nativeserver.New(token, ptys)
+	tabs := tabstate.New()
+	native := nativeserver.New(token, ptys, tabs)
 
 	handler, err := server.New(server.Config{
 		PassbubbleURL: pbURL,
@@ -104,15 +132,38 @@ func main() {
 
 	// Announce ourselves, then serve.
 	emitHandshake(handshake{Port: port, Token: token, PID: os.Getpid()})
+	// Also drop the endpoint into a discovery file so browser-spawned helpers (the
+	// native-messaging host cmd/tabhost) can find this loopback API + token. Removed
+	// again on shutdown so a stale token can't linger past this launch.
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+	if err := discovery.Write(discovery.Endpoint{Base: base, Token: token, PID: os.Getpid()}); err != nil {
+		log.Printf("discovery file: %v", err) // non-fatal: only the tabs feature degrades
+	}
+	// Keep the browser-extension native-messaging host manifest current (path may move
+	// between launches). Best-effort: a failure only disables the live-tabs feature.
+	if written, err := nmhost.InstallDefault(); err != nil {
+		log.Printf("native host: %v", err)
+	} else if len(written) > 0 {
+		log.Printf("native host manifest installed for %d browser(s)", len(written))
+	}
 	log.Printf("sidecar on 127.0.0.1:%d (proxying /pb → %s)", port, pbURL)
 
-	go watchParent(func() {
-		log.Print("parent gone — shutting down")
+	cleanup := func(reason string) {
+		log.Printf("%s — shutting down", reason)
+		_ = discovery.Remove()
 		ptys.CloseAll()
 		os.Exit(0)
-	})
+	}
+	go watchParent(func() { cleanup("parent gone") })
+
+	// Graceful quit (Electron sends SIGTERM before SIGKILL): drop the discovery file
+	// so no stale endpoint/token lingers.
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
+	go func() { cleanup((<-sig).String()) }()
 
 	if err := srv.Serve(ln); err != nil {
+		_ = discovery.Remove()
 		ptys.CloseAll()
 		log.Fatalf("serve: %v", err)
 	}

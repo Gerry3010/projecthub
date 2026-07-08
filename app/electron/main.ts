@@ -109,10 +109,14 @@ function loadRenderer(hs: Handshake): void {
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: true,
+        webviewTag: true, // browser-panel tiles use <webview>
         additionalArguments: [`--ph-port=${hs.port}`, `--ph-token=${hs.token}`],
       },
     });
     win.on("closed", () => (win = null));
+    // Surface renderer console + errors to the main-process stdout for debugging.
+    win.webContents.on("console-message", (_e, _lvl, message) => console.log("[renderer]", message));
+    win.webContents.on("render-process-gone", (_e, d) => console.error("[renderer gone]", d.reason));
   }
   win.loadURL(base);
 }

@@ -1,0 +1,223 @@
+/* Copyright (C) 2026 Gerald Hofbauer <info@geraldhofbauer.net> — AGPLv3.
+   Tiling-workspace + island styling, bundled into web/shell.css. Kept out of
+   app.css so it doesn't collide with the parallel theming edits there. */
+
+/* ── workspace shell ─────────────────────────────────────────────────────── */
+.ph-workspace {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--fg);
+}
+/* wallpaper layer: color or image, with an optional dark dim overlay */
+.ph-ws-wallpaper {
+  position: absolute; inset: 0; z-index: 0;
+  pointer-events: none; /* purely decorative — must never intercept clicks */
+  background-color: var(--bg-color, transparent);
+  background-image: var(--bg-image, none);
+  background-size: cover; background-position: center; background-repeat: no-repeat;
+}
+.ph-ws-wallpaper::after {
+  content: ""; position: absolute; inset: 0;
+  background: rgba(0, 0, 0, var(--bg-dim, 0));
+}
+.ph-ws-body { position: relative; z-index: 1; }
+/* toolbar must sit ABOVE the body so its dropdown menu isn't covered by tiles */
+.ph-ws-toolbar { position: relative; z-index: 10; }
+
+/* chrome (bars/menus/panels) is not text-selectable; content areas stay selectable */
+.ph-ws-toolbar, .ph-tile-bar, .ph-menu, .ph-appr, .ph-appr-head, .ph-island-bar {
+  user-select: none; -webkit-user-select: none;
+}
+.ph-island-input, .ph-appr input, .ph-appr textarea, .ph-tile-body, .ph-tilecontent {
+  user-select: text; -webkit-user-select: text;
+}
+
+/* drag drop-zone preview: a translucent accent rectangle over the target half/edge */
+.ph-drop-hint {
+  position: fixed; z-index: 9999; pointer-events: none;
+  background: color-mix(in srgb, var(--accent) 26%, transparent);
+  border: 2px solid var(--accent); border-radius: 8px;
+  box-shadow: 0 0 0 1px rgba(0,0,0,0.3) inset;
+}
+
+/* toolbar chrome */
+.ph-add { position: relative; }
+.ph-menu {
+  position: absolute; top: 2.2rem; right: 0; z-index: 20; min-width: 180px;
+  background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+  padding: 0.3rem; display: flex; flex-direction: column;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.4);
+}
+.ph-menu-item {
+  background: none; border: 0; color: var(--fg); text-align: left;
+  padding: 0.45rem 0.6rem; border-radius: 6px; cursor: pointer; font-size: 0.9rem;
+}
+.ph-menu-item:hover { background: var(--border); }
+.ph-empty { display: grid; place-items: center; height: 100%; color: var(--muted); }
+.ph-tilecontent { height: 100%; overflow: auto; padding: 0.6rem; }
+.ph-island-wrap { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.ph-island-bar { flex: 0 0 auto; padding: 0.25rem; border-bottom: 1px solid var(--border); }
+.ph-island-input {
+  width: 100%; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 6px; color: var(--fg); padding: 0.3rem 0.5rem; font-size: 0.85rem;
+}
+.ph-island-wrap .ph-island { flex: 1; min-height: 0; position: relative; }
+.ph-browser-bar { display: flex; gap: 0.3rem; align-items: center; }
+.ph-browser-bar .ph-island-input { flex: 1; }
+.ph-go { padding: 0.25rem 0.7rem; font-size: 0.9rem; line-height: 1; }
+
+/* live browser-tabs tile */
+.ph-tabgroup { margin-bottom: 0.6rem; }
+.ph-tabgroup-head {
+  display: flex; align-items: center; gap: 0.4rem;
+  margin: 0.25rem 0 0.4rem; font-size: 0.85rem;
+}
+.ph-tabgroup-head .ph-muted { margin-left: auto; font-size: 0.8rem; }
+.ph-tabgroup-head .ph-tile-btn { padding: 0.1rem 0.4rem; font-size: 0.85rem; }
+.ph-browser-icon { display: block; flex: none; }
+.ph-group-chip {
+  width: 9px; height: 9px; border-radius: 50%; flex: none; display: inline-block;
+}
+.ph-tabgroup .ph-list { gap: 0.25rem; }
+.ph-tabitem {
+  cursor: pointer; gap: 0.5rem; justify-content: flex-start;
+  padding: 0.4rem 0.55rem;
+}
+.ph-tabitem:hover { border-color: var(--accent, #6d8bff); }
+.ph-tab-active { border-color: var(--accent, #6d8bff); }
+.ph-tab-favicon {
+  width: 16px; height: 16px; flex: none; border-radius: 3px; object-fit: contain;
+}
+.ph-tab-favicon-fallback {
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 12px; line-height: 16px;
+}
+.ph-tabitem .ph-suggest-info { min-width: 0; flex: 1; }
+.ph-tabitem .ph-title {
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 0.85rem;
+}
+.ph-taburl {
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  max-width: 100%; font-size: 0.78rem;
+}
+.ph-tabpin { flex: none; font-size: 0.75rem; }
+
+/* appearance / background panel */
+.ph-appr {
+  position: absolute; top: 3rem; right: 0.6rem; z-index: 30;
+  width: 300px; max-width: calc(100vw - 1.2rem);
+  background: color-mix(in srgb, var(--card) 96%, transparent);
+  border: 1px solid var(--border); border-radius: 10px;
+  padding: 0.8rem; display: flex; flex-direction: column; gap: 0.45rem;
+  backdrop-filter: blur(12px); box-shadow: 0 12px 40px rgba(0,0,0,0.45);
+}
+.ph-appr-head { display: flex; align-items: center; gap: 0.4rem; }
+.ph-appr-lbl { font-size: 0.78rem; color: var(--muted); margin: 0.25rem 0 0; }
+.ph-appr-slider input[type="range"] { width: 100%; }
+.ph-appr-hint { font-size: 0.74rem; margin: 0.2rem 0 0; }
+.ph-scope-btn {
+  flex: 1; background: var(--bg); color: var(--fg);
+  border: 1px solid var(--border); border-radius: 7px; padding: 0.35rem; cursor: pointer; font-size: 0.82rem;
+}
+.ph-scope-btn.ph-scope-on { border-color: var(--accent); color: var(--accent); }
+.ph-ws-toolbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--card) 88%, transparent);
+}
+.ph-ws-toolbar .ph-spacer { flex: 1; }
+.ph-ws-body { flex: 1; min-height: 0; position: relative; }
+
+/* ── split tree ──────────────────────────────────────────────────────────── */
+.ph-split { display: flex; width: 100%; height: 100%; min-width: 0; min-height: 0; }
+.ph-split[data-dir="col"] { flex-direction: column; }
+.ph-split-a { flex: var(--r, 0.5) 1 0; min-width: 0; min-height: 0; display: flex; }
+.ph-split-b { flex: calc(1 - var(--r, 0.5)) 1 0; min-width: 0; min-height: 0; display: flex; }
+.ph-split-a > *, .ph-split-b > * { flex: 1; min-width: 0; min-height: 0; }
+
+.ph-divider {
+  flex: 0 0 6px;
+  background: var(--border);
+  cursor: col-resize;
+  transition: background 0.12s;
+}
+.ph-split[data-dir="col"] > .ph-divider { cursor: row-resize; }
+.ph-divider:hover { background: var(--accent); }
+body.ph-resizing { cursor: grabbing; user-select: none; }
+
+/* ── tile ────────────────────────────────────────────────────────────────── */
+.ph-tile {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  margin: 3px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--card) calc(var(--panel-alpha, 1) * 100%), transparent);
+  backdrop-filter: blur(var(--panel-blur, 0px));
+}
+.ph-tile.ph-tile-focus { border-color: var(--accent); }
+.ph-tile-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.25rem 0.5rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+  cursor: grab;
+  user-select: none;
+}
+.ph-tile-bar .ph-tile-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ph-tile-btn {
+  background: none; border: 0; color: var(--muted); cursor: pointer;
+  padding: 0 0.25rem; font-size: 0.85rem; line-height: 1; border-radius: 4px;
+}
+.ph-tile-btn:hover { color: var(--fg); background: var(--border); }
+.ph-tile-body { flex: 1; min-height: 0; position: relative; overflow: hidden; }
+
+/* ── drag-drop drop zones ─────────────────────────────────────────────────── */
+.ph-tile.ph-drag-over::after {
+  content: "";
+  position: absolute; inset: 0;
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  pointer-events: none;
+}
+
+/* ── islands ─────────────────────────────────────────────────────────────── */
+.ph-island, .ph-island-inner { width: 100%; height: 100%; min-width: 0; min-height: 0; }
+.ph-island-inner { position: absolute; inset: 0; }
+.ph-browser webview { border: 0; }
+
+/* xterm fills its slot */
+.ph-island-inner .xterm { height: 100%; padding: 4px 6px; }
+
+/* ── markdown ────────────────────────────────────────────────────────────── */
+.ph-md {
+  overflow: auto;
+  padding: 0.8rem 1.1rem;
+  line-height: 1.55;
+  color: var(--fg);
+}
+.ph-md h1, .ph-md h2, .ph-md h3 { border-bottom: 1px solid var(--border); padding-bottom: 0.2rem; }
+.ph-md a { color: var(--accent); }
+.ph-md code {
+  background: color-mix(in srgb, var(--fg) 12%, transparent);
+  padding: 0.1rem 0.3rem; border-radius: 4px; font-size: 0.9em;
+}
+.ph-md pre {
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  padding: 0.7rem 0.9rem; border-radius: 8px; overflow: auto;
+}
+.ph-md pre code { background: none; padding: 0; }
+.ph-md-err { color: var(--err); }

@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8" />
+    <title>ProjectHub Live Tabs</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 2rem; max-width: 32rem; color: #222; }
+      h1 { font-size: 1.2rem; }
+      .status { padding: .75rem 1rem; border-radius: .5rem; margin: 1rem 0; }
+      .ok { background: #e6f6ec; color: #14622f; }
+      .err { background: #fdecec; color: #8a1c1c; }
+      .muted { color: #666; font-size: .85rem; }
+      code { background: #f0f0f0; padding: .1rem .3rem; border-radius: .25rem; }
+    </style>
+  </head>
+  <body>
+    <h1>ProjectHub — Live Tabs</h1>
+    <p class="muted">
+      Diese Erweiterung meldet die aktuell offenen Tabs an die ProjectHub-Desktop-App.
+      Die App muss laufen; die Verbindung läuft lokal über den Native-Messaging-Host
+      <code>net.geraldhofbauer.projecthub.tabs</code>.
+    </p>
+    <div id="status" class="status muted">Status wird geladen…</div>
+    <button id="refresh">Jetzt synchronisieren</button>
+    <script src="options.js"></script>
+  </body>
+</html>

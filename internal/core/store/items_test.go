@@ -91,3 +91,81 @@ func TestTabSetsPinsFiles(t *testing.T) {
 		t.Fatalf("file not deleted")
 	}
 }
+
+func TestLayoutRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	p, err := s.CreateProject(ctx, "Tiling", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	refs, _ := s.ListProjects(ctx)
+	folder := refs[0].FolderID
+	_ = p
+
+	// none yet
+	if l, err := s.GetLayout(ctx, folder); err != nil || l != nil {
+		t.Fatalf("expected no layout, got %+v err=%v", l, err)
+	}
+
+	layout := domain.Layout{Version: 1, Root: &domain.LayoutNode{
+		Dir: "row", Ratio: 0.4, PaneID: "split-1",
+		A: &domain.LayoutNode{PaneID: "t1", Type: domain.TileTerminal, Params: map[string]string{"cwd": "/tmp/x"}},
+		B: &domain.LayoutNode{PaneID: "m1", Type: domain.TileMarkdown, Params: map[string]string{"path": "/tmp/x/README.md"}},
+	}}
+	id, err := s.SetLayout(ctx, folder, layout)
+	if err != nil {
+		t.Fatalf("set layout: %v", err)
+	}
+
+	got, err := s.GetLayout(ctx, folder)
+	if err != nil || got == nil {
+		t.Fatalf("get layout: %v", err)
+	}
+	if got.Val.Root == nil || got.Val.Root.Dir != "row" || got.Val.Root.A.Type != domain.TileTerminal ||
+		got.Val.Root.B.Params["path"] != "/tmp/x/README.md" {
+		t.Fatalf("layout round-trip mismatch: %+v", got.Val.Root)
+	}
+
+	// update in place keeps the same entry (one ph-layout per project)
+	layout.Root.Ratio = 0.6
+	id2, err := s.SetLayout(ctx, folder, layout)
+	if err != nil || id2 != id {
+		t.Fatalf("update should reuse entry: id=%s id2=%s err=%v", id, id2, err)
+	}
+	got2, _ := s.GetLayout(ctx, folder)
+	if got2.Val.Root.Ratio != 0.6 {
+		t.Fatalf("ratio not updated: %v", got2.Val.Root.Ratio)
+	}
+}
+
+func TestBackgroundRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	p, err := s.CreateProject(ctx, "BG", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// account default
+	if bg, err := s.Background(ctx); err != nil || bg != nil {
+		t.Fatalf("expected no account bg, got %+v err=%v", bg, err)
+	}
+	acc := &domain.Background{Type: "color", Color: "#101820", Alpha: 0.7, Blur: 12, Dim: 0.3}
+	if err := s.SetBackground(ctx, acc); err != nil {
+		t.Fatalf("set account bg: %v", err)
+	}
+	if bg, _ := s.Background(ctx); bg == nil || bg.Alpha != 0.7 || bg.Blur != 12 {
+		t.Fatalf("account bg round-trip mismatch: %+v", bg)
+	}
+
+	// per-project override mirrored into the RootIndex
+	pbg := &domain.Background{Type: "image", Image: "file:/tmp/wall.jpg", Alpha: 0.5}
+	if err := s.SetProjectBackground(ctx, p.ID, pbg); err != nil {
+		t.Fatalf("set project bg: %v", err)
+	}
+	refs, _ := s.ListProjects(ctx)
+	if refs[0].Background == nil || refs[0].Background.Image != "file:/tmp/wall.jpg" {
+		t.Fatalf("project bg mirror missing: %+v", refs[0].Background)
+	}
+}

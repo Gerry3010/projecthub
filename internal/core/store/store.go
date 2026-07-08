@@ -248,12 +248,13 @@ func (s *Store) CreateProject(ctx context.Context, title, description, localPath
 		LocalPath:   localPath,
 		CreatedAt:   time.Now(),
 	}
+	p.Color = domain.AutoColor(p.ID) // distinct-but-stable default from the id; user can change it
 	if _, err := s.putEntry(ctx, &folderID, domain.KindManifest, p); err != nil {
 		return nil, err
 	}
 
 	idx.Projects = append(idx.Projects, domain.ProjectRef{
-		ID: p.ID, FolderID: folderID, Title: p.Title, Slug: p.Slug, LocalPath: p.LocalPath,
+		ID: p.ID, FolderID: folderID, Title: p.Title, Slug: p.Slug, LocalPath: p.LocalPath, Color: p.Color,
 	})
 	if err := s.saveIndex(ctx, idx); err != nil {
 		return nil, err
@@ -285,6 +286,128 @@ func (s *Store) DeleteProject(ctx context.Context, projectID string) error {
 	}
 	idx.Projects = kept
 	return s.saveIndex(ctx, idx)
+}
+
+// SetProjectColor updates a project's accent (a CSS hex like "#6366f1"; "" clears
+// it) in both the ph-manifest and its RootIndex mirror, so the change is visible in
+// the list view without decrypting the manifest.
+func (s *Store) SetProjectColor(ctx context.Context, projectID, color string) error {
+	idx, err := s.loadIndex(ctx)
+	if err != nil {
+		return err
+	}
+	i := indexOfProject(idx.Projects, projectID)
+	if i < 0 {
+		return fmt.Errorf("project %s not found", projectID)
+	}
+	folderID := idx.Projects[i].FolderID
+
+	entryID, manifest, err := s.projectManifest(ctx, folderID)
+	if err != nil {
+		return err
+	}
+	manifest.Color = color
+	if err := s.updateEntry(ctx, entryID, &folderID, domain.KindManifest, manifest); err != nil {
+		return err
+	}
+
+	idx.Projects[i].Color = color
+	return s.saveIndex(ctx, idx)
+}
+
+// AccentColor returns the account-level app accent, or domain.DefaultAccent when
+// the user has not chosen one yet.
+func (s *Store) AccentColor(ctx context.Context) (string, error) {
+	idx, err := s.loadIndex(ctx)
+	if err != nil {
+		return "", err
+	}
+	if idx.AccentColor == "" {
+		return domain.DefaultAccent, nil
+	}
+	return idx.AccentColor, nil
+}
+
+// SetAccentColor persists the account-level app accent in the RootIndex so it
+// syncs across devices.
+func (s *Store) SetAccentColor(ctx context.Context, color string) error {
+	idx, err := s.loadIndex(ctx)
+	if err != nil {
+		return err
+	}
+	idx.AccentColor = color
+	return s.saveIndex(ctx, idx)
+}
+
+// Background returns the account-level default background (nil ⇒ flat --bg color).
+func (s *Store) Background(ctx context.Context) (*domain.Background, error) {
+	idx, err := s.loadIndex(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return idx.Background, nil
+}
+
+// SetBackground persists the account-level default background in the RootIndex.
+func (s *Store) SetBackground(ctx context.Context, bg *domain.Background) error {
+	idx, err := s.loadIndex(ctx)
+	if err != nil {
+		return err
+	}
+	idx.Background = bg
+	return s.saveIndex(ctx, idx)
+}
+
+// SetProjectBackground updates a project's per-project background override in both
+// the ph-manifest and its RootIndex mirror (nil ⇒ inherit the account default).
+func (s *Store) SetProjectBackground(ctx context.Context, projectID string, bg *domain.Background) error {
+	idx, err := s.loadIndex(ctx)
+	if err != nil {
+		return err
+	}
+	i := indexOfProject(idx.Projects, projectID)
+	if i < 0 {
+		return fmt.Errorf("project %s not found", projectID)
+	}
+	folderID := idx.Projects[i].FolderID
+
+	entryID, manifest, err := s.projectManifest(ctx, folderID)
+	if err != nil {
+		return err
+	}
+	manifest.Background = bg
+	if err := s.updateEntry(ctx, entryID, &folderID, domain.KindManifest, manifest); err != nil {
+		return err
+	}
+
+	idx.Projects[i].Background = bg
+	return s.saveIndex(ctx, idx)
+}
+
+// projectManifest loads a project folder's ph-manifest entry id and decrypted payload.
+func (s *Store) projectManifest(ctx context.Context, folderID string) (string, *domain.Project, error) {
+	metas, err := s.entriesOfKind(ctx, folderID, domain.KindManifest)
+	if err != nil {
+		return "", nil, err
+	}
+	if len(metas) == 0 {
+		return "", nil, fmt.Errorf("no manifest in folder %s", folderID)
+	}
+	var p domain.Project
+	if err := s.getEntry(ctx, metas[0].ID, &p); err != nil {
+		return "", nil, err
+	}
+	return metas[0].ID, &p, nil
+}
+
+// indexOfProject returns the position of projectID in refs, or -1.
+func indexOfProject(refs []domain.ProjectRef, projectID string) int {
+	for i := range refs {
+		if refs[i].ID == projectID {
+			return i
+		}
+	}
+	return -1
 }
 
 // ─── notes ──────────────────────────────────────────────────────────────────

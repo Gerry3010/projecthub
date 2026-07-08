@@ -47,6 +47,7 @@ type Root struct {
 	// login form state
 	email    string
 	password string
+	remember bool   // "stay signed in on this device" — persist creds in localStorage
 	status   string // error/info message
 
 	// session state (populated after unlock)
@@ -62,6 +63,17 @@ type Root struct {
 
 	// new-project form
 	newTitle string
+
+	// account-level app accent (CSS hex); loaded at unlock, synced via the RootIndex
+	accent string
+}
+
+// accentColor returns the chosen app accent, or the default when none is set yet.
+func (r *Root) accentColor() string {
+	if r.accent == "" {
+		return domain.DefaultAccent
+	}
+	return r.accent
 }
 
 func (r *Root) Render() app.UI {
@@ -69,7 +81,7 @@ func (r *Root) Render() app.UI {
 	case !r.unlocked:
 		return r.loginView()
 	case r.selected != nil:
-		return &ProjectPage{Store: r.store, Ref: *r.selected, Back: r.closeProject}
+		return &Workspace{Store: r.store, Ref: *r.selected, Back: r.closeProject, Native: r.native}
 	default:
 		return r.projectsView()
 	}
@@ -91,15 +103,47 @@ func (r *Root) closeProject(ctx app.Context) {
 
 // ─── login / unlock ─────────────────────────────────────────────────────────
 
+// OnMount restores a remembered login: the email is always prefilled; if the user
+// chose "stay signed in" the password is prefilled too and we auto-unlock. Storage
+// is localStorage on the loopback desktop origin — the user's explicit, local-only
+// opt-in (a keychain-backed store is a later hardening step).
+func (r *Root) OnMount(ctx app.Context) {
+	if r.unlocked {
+		return
+	}
+	r.email = lsGet("ph.email")
+	if lsGet("ph.remember") == "1" {
+		r.remember = true
+		r.password = lsGet("ph.pw")
+		if r.email != "" && r.password != "" {
+			r.doLogin(ctx)
+		}
+	}
+}
+
 func (r *Root) loginView() app.UI {
-	return app.Div().Class("ph-center").Body(
+	return app.Div().Class("ph-center").Style("--accent", r.accentColor()).Body(
 		app.Div().Class("ph-card").Body(
-			app.H1().Text("ProjectHub"),
+			app.Div().Class("ph-brand ph-brand-lg").Body(
+				nexusIcon(r.accentColor(), 34),
+				app.H1().Text("ProjectHub"),
+			),
 			app.P().Class("ph-muted").Text("Mit deinem Passbubble-Konto anmelden"),
-			app.Input().Type("email").Placeholder("E-Mail").Value(r.email).
-				Attr("autocomplete", "username").OnInput(r.bind(&r.email)),
-			app.Input().Type("password").Placeholder("Master-Passwort").Value(r.password).
-				Attr("autocomplete", "current-password").OnInput(r.bind(&r.password)),
+			app.Input().Type("email").Placeholder("E-Mail").Value(r.email).ID("ph-email").
+				Attr("autocomplete", "username").OnInput(r.bind(&r.email)).
+				OnKeyDown(focusOnEnter("ph-pw")),
+			app.Input().Type("password").Placeholder("Master-Passwort").Value(r.password).ID("ph-pw").
+				Attr("autocomplete", "current-password").OnInput(r.bind(&r.password)).
+				OnKeyDown(func(ctx app.Context, e app.Event) {
+					if e.Get("key").String() == "Enter" {
+						r.doLogin(ctx)
+					}
+				}),
+			app.Label().Class("ph-check").Body(
+				app.Input().Type("checkbox").Checked(r.remember).
+					OnChange(func(ctx app.Context, e app.Event) { r.remember = ctx.JSSrc().Get("checked").Bool() }),
+				app.Text("Angemeldet bleiben (lokal auf diesem Gerät)"),
+			),
 			app.Button().Class("ph-btn").Disabled(r.busy).Text(btnLabel(r.busy, "Entsperren", "Entschlüssele…")).
 				OnClick(r.login),
 			app.If(r.status != "", func() app.UI { return app.P().Class("ph-err").Text(r.status) }),
@@ -107,9 +151,13 @@ func (r *Root) loginView() app.UI {
 	)
 }
 
-// login authenticates against Passbubble and unlocks the vault entirely in the
+// login is the button/Enter handler; the real work is in doLogin so OnMount can
+// reuse it for auto-unlock.
+func (r *Root) login(ctx app.Context, _ app.Event) { r.doLogin(ctx) }
+
+// doLogin authenticates against Passbubble and unlocks the vault entirely in the
 // browser. Network + crypto run off the UI goroutine via ctx.Async.
-func (r *Root) login(ctx app.Context, _ app.Event) {
+func (r *Root) doLogin(ctx app.Context) {
 	if r.busy {
 		return
 	}
@@ -151,6 +199,10 @@ func (r *Root) login(ctx app.Context, _ app.Event) {
 			r.fail(ctx, "Projekte laden fehlgeschlagen: "+err.Error())
 			return
 		}
+		accent, err := st.AccentColor(context.Background())
+		if err != nil {
+			accent = domain.DefaultAccent // non-fatal: fall back rather than block unlock
+		}
 
 		// Under the Electron shell, offer recently-active Claude Code dirs that
 		// aren't projects yet. In the hosted browser build phNative is undefined,
@@ -167,22 +219,75 @@ func (r *Root) login(ctx app.Context, _ app.Event) {
 		ctx.Dispatch(func(ctx app.Context) {
 			r.busy = false
 			r.unlocked = true
-			r.password = "" // drop the plaintext password from component state
 			r.store = st
 			r.projects = projects
+			r.accent = accent
 			r.native = nc
 			r.suggestions = suggestions
+
+			// Persist per the "stay signed in" choice (local-only, this device).
+			lsSet("ph.email", email)
+			if r.remember {
+				lsSet("ph.remember", "1")
+				lsSet("ph.pw", password)
+			} else {
+				lsDel("ph.remember")
+				lsDel("ph.pw")
+			}
+			r.password = "" // drop the plaintext password from component state
 		})
+		pushRoster(nc, projects)
 	})
+}
+
+// ─── local (device) login persistence ────────────────────────────────────────
+
+func lsGet(key string) string {
+	ls := app.Window().Get("localStorage")
+	if !ls.Truthy() {
+		return ""
+	}
+	if v := ls.Call("getItem", key); v.Truthy() {
+		return v.String()
+	}
+	return ""
+}
+
+func lsSet(key, val string) {
+	if ls := app.Window().Get("localStorage"); ls.Truthy() {
+		ls.Call("setItem", key, val)
+	}
+}
+
+func lsDel(key string) {
+	if ls := app.Window().Get("localStorage"); ls.Truthy() {
+		ls.Call("removeItem", key)
+	}
+}
+
+// focusOnEnter moves focus to the element with id when Enter is pressed — so Enter
+// on the email field jumps to the password field.
+func focusOnEnter(id string) app.EventHandler {
+	return func(ctx app.Context, e app.Event) {
+		if e.Get("key").String() == "Enter" {
+			app.Window().Get("document").Call("getElementById", id).Call("focus")
+		}
+	}
 }
 
 // ─── projects ───────────────────────────────────────────────────────────────
 
 func (r *Root) projectsView() app.UI {
-	return app.Div().Class("ph-app").Body(
+	return app.Div().Class("ph-app").Style("--accent", r.accentColor()).Body(
 		app.Header().Class("ph-header").Body(
-			app.H1().Text("Projekte"),
-			app.Span().Class("ph-muted").Text(r.email),
+			app.Div().Class("ph-brand").Body(
+				nexusIcon(r.accentColor(), 26),
+				app.H1().Text("Projekte"),
+			),
+			app.Div().Class("ph-headright").Body(
+				app.Span().Class("ph-muted").Text(r.email),
+				swatchBar(r.accentColor(), r.pickAccent, r.customAccent),
+			),
 		),
 		app.Div().Class("ph-newprj").Body(
 			app.Input().Type("text").Placeholder("Neues Projekt…").Value(r.newTitle).OnInput(r.bind(&r.newTitle)),
@@ -193,7 +298,10 @@ func (r *Root) projectsView() app.UI {
 			app.Range(r.projects).Slice(func(i int) app.UI {
 				p := r.projects[i]
 				return app.Li().Class("ph-item").Body(
-					app.Button().Class("ph-title ph-titlebtn").Text(p.Title).OnClick(r.openProject(p)),
+					app.Div().Class("ph-item-main").Body(
+						nexusIcon(p.AccentColor(), 22),
+						app.Button().Class("ph-title ph-titlebtn").Text(p.Title).OnClick(r.openProject(p)),
+					),
 					app.Button().Class("ph-link").Text("löschen").OnClick(func(ctx app.Context, _ app.Event) {
 						r.deleteProject(ctx, p.ID)
 					}),
@@ -264,6 +372,32 @@ func (r *Root) createProject(ctx app.Context, _ app.Event) {
 	})
 }
 
+// pickAccent sets the app accent to a preset swatch and persists it.
+func (r *Root) pickAccent(color string) app.EventHandler {
+	return func(ctx app.Context, _ app.Event) { r.applyAccent(ctx, color) }
+}
+
+// customAccent handles the native color-well change event.
+func (r *Root) customAccent(ctx app.Context, _ app.Event) {
+	r.applyAccent(ctx, ctx.JSSrc().Get("value").String())
+}
+
+// applyAccent updates the accent in the UI immediately and persists it to the
+// RootIndex in the background (best-effort: a failed save is non-fatal — the local
+// pick still holds for the session).
+func (r *Root) applyAccent(ctx app.Context, color string) {
+	if color == "" || color == r.accent {
+		return
+	}
+	r.accent = color
+	st := r.store
+	ctx.Async(func() {
+		if err := st.SetAccentColor(context.Background(), color); err != nil {
+			ctx.Dispatch(func(ctx app.Context) { r.status = "Akzentfarbe speichern fehlgeschlagen: " + err.Error() })
+		}
+	})
+}
+
 func (r *Root) deleteProject(ctx app.Context, id string) {
 	if r.busy {
 		return
@@ -295,9 +429,26 @@ func (r *Root) reload(ctx app.Context, mutate func()) {
 		r.suggestions = filterAdded(r.suggestions, projects)
 		r.busy = false
 	})
+	pushRoster(r.native, projects)
 }
 
 // ─── Claude Code suggestions (desktop shell) ─────────────────────────────────
+
+// pushRoster best-effort pushes the project id+title roster into the sidecar so the
+// browser-extension popup can list projects to couple tab groups to. It is always
+// called from a goroutine already off the UI thread (inside ctx.Async), so the
+// blocking HTTP call here never stalls rendering; failures are silently ignored (the
+// popup just shows a stale/empty roster until the next successful push).
+func pushRoster(nc *nativeclient.Client, projects []domain.ProjectRef) {
+	if !nc.Available() {
+		return
+	}
+	roster := make([]domain.RosterEntry, len(projects))
+	for i, p := range projects {
+		roster[i] = domain.RosterEntry{ID: p.ID, Title: p.Title}
+	}
+	_ = nc.SetProjects(context.Background(), roster)
+}
 
 // readPhNative reads the sidecar base URL + bearer token the Electron preload
 // injects as window.phNative. Both are empty in the hosted browser build.

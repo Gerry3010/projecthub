@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -200,6 +201,65 @@ func TestProjectLifecycle(t *testing.T) {
 	}
 }
 
+func TestProjectColor(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	p, err := s.CreateProject(ctx, "Farbe", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// New projects get a stable default from the built-in palette.
+	if !slices.Contains(domain.DefaultPalette, p.Color) {
+		t.Fatalf("new project color %q not from DefaultPalette", p.Color)
+	}
+	refs, _ := s.ListProjects(ctx)
+	if refs[0].Color != p.Color {
+		t.Fatalf("index mirror %q != manifest %q", refs[0].Color, p.Color)
+	}
+
+	if err := s.SetProjectColor(ctx, p.ID, domain.ColorViolet); err != nil {
+		t.Fatalf("set color: %v", err)
+	}
+	// A fresh store must see the new color in both the index mirror and the manifest.
+	s2 := New(s.api, s.keys)
+	refs2, _ := s2.ListProjects(ctx)
+	if refs2[0].Color != domain.ColorViolet {
+		t.Fatalf("index color not persisted: %q", refs2[0].Color)
+	}
+	_, manifest, err := s2.projectManifest(ctx, refs2[0].FolderID)
+	if err != nil {
+		t.Fatalf("load manifest: %v", err)
+	}
+	if manifest.Color != domain.ColorViolet {
+		t.Fatalf("manifest color not persisted: %q", manifest.Color)
+	}
+}
+
+func TestAccentColor(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	got, err := s.AccentColor(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != domain.DefaultAccent {
+		t.Fatalf("default accent = %q, want %q", got, domain.DefaultAccent)
+	}
+	if err := s.SetAccentColor(ctx, domain.ColorTeal); err != nil {
+		t.Fatalf("set accent: %v", err)
+	}
+	// Persisted in the RootIndex → a fresh store reads it back.
+	again, err := New(s.api, s.keys).AccentColor(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again != domain.ColorTeal {
+		t.Fatalf("accent not persisted: %q", again)
+	}
+}
+
 func TestNotesRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
@@ -238,4 +298,45 @@ func TestNotesRoundTrip(t *testing.T) {
 		t.Fatalf("expected 0 notes after delete, got %d", len(notes))
 	}
 	_ = p
+}
+
+func TestTodosRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	if _, err := s.CreateProject(ctx, "Todos", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	refs, _ := s.ListProjects(ctx)
+	folderID := refs[0].FolderID
+
+	id, err := s.CreateTodo(ctx, folderID, domain.TodoItem{Text: "SECRET task"})
+	if err != nil {
+		t.Fatalf("create todo: %v", err)
+	}
+	todos, err := s.ListTodos(ctx, folderID)
+	if err != nil || len(todos) != 1 {
+		t.Fatalf("list todos: %v (%d)", err, len(todos))
+	}
+	if todos[0].Val.Text != "SECRET task" || todos[0].Val.Done {
+		t.Fatalf("todo mismatch: %+v", todos[0].Val)
+	}
+
+	// Toggle done and persist.
+	it := todos[0].Val
+	it.Done = true
+	if err := s.UpdateTodo(ctx, id, folderID, it); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	todos, _ = s.ListTodos(ctx, folderID)
+	if !todos[0].Val.Done {
+		t.Fatalf("toggle not persisted: %+v", todos[0].Val)
+	}
+
+	if err := s.DeleteTodo(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	todos, _ = s.ListTodos(ctx, folderID)
+	if len(todos) != 0 {
+		t.Fatalf("expected 0 todos after delete, got %d", len(todos))
+	}
 }

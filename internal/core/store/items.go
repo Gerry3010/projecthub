@@ -62,6 +62,28 @@ func (s *Store) ListTabSets(ctx context.Context, projectFolderID string) ([]Item
 	return listItems[domain.TabSet](ctx, s, projectFolderID, domain.KindTabSet)
 }
 
+// ─── todos ────────────────────────────────────────────────────────────────────
+
+// CreateTodo adds a checklist item to a project's folder (each todo = one entry).
+func (s *Store) CreateTodo(ctx context.Context, projectFolderID string, t domain.TodoItem) (string, error) {
+	return s.putEntry(ctx, &projectFolderID, domain.KindTodo, t)
+}
+
+// UpdateTodo re-encrypts an existing todo in place (e.g. toggling Done).
+func (s *Store) UpdateTodo(ctx context.Context, id, projectFolderID string, t domain.TodoItem) error {
+	return s.updateEntry(ctx, id, &projectFolderID, domain.KindTodo, t)
+}
+
+// DeleteTodo removes a todo entry.
+func (s *Store) DeleteTodo(ctx context.Context, id string) error {
+	return s.api.DeleteEntry(ctx, id)
+}
+
+// ListTodos fetches and decrypts every todo in a project folder.
+func (s *Store) ListTodos(ctx context.Context, projectFolderID string) ([]Item[domain.TodoItem], error) {
+	return listItems[domain.TodoItem](ctx, s, projectFolderID, domain.KindTodo)
+}
+
 // ─── pinned items ───────────────────────────────────────────────────────────
 
 func (s *Store) CreatePin(ctx context.Context, projectFolderID string, p domain.PinnedItem) (string, error) {
@@ -107,6 +129,33 @@ func (s *Store) SetPipepushLink(ctx context.Context, projectFolderID string, l d
 		return existing.ID, s.updateEntry(ctx, existing.ID, &projectFolderID, domain.KindPipepushLink, l)
 	}
 	return s.putEntry(ctx, &projectFolderID, domain.KindPipepushLink, l)
+}
+
+// ─── workspace layout ─────────────────────────────────────────────────────────
+
+// GetLayout returns the project's tiling layout, or nil if none is saved yet.
+func (s *Store) GetLayout(ctx context.Context, projectFolderID string) (*Item[domain.Layout], error) {
+	layouts, err := listItems[domain.Layout](ctx, s, projectFolderID, domain.KindLayout)
+	if err != nil {
+		return nil, err
+	}
+	if len(layouts) == 0 {
+		return nil, nil
+	}
+	return &layouts[0], nil
+}
+
+// SetLayout creates the project's layout, or updates it in place if one exists. A
+// project has at most one layout entry.
+func (s *Store) SetLayout(ctx context.Context, projectFolderID string, l domain.Layout) (string, error) {
+	existing, err := s.GetLayout(ctx, projectFolderID)
+	if err != nil {
+		return "", err
+	}
+	if existing != nil {
+		return existing.ID, s.updateEntry(ctx, existing.ID, &projectFolderID, domain.KindLayout, l)
+	}
+	return s.putEntry(ctx, &projectFolderID, domain.KindLayout, l)
 }
 
 // ─── files ──────────────────────────────────────────────────────────────────

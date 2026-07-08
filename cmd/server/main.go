@@ -53,8 +53,9 @@ func main() {
 		Description: "Persönlicher Projekt-Manager mit E2E-Verschlüsselung über Passbubble.",
 		Title:       "ProjectHub",
 		Lang:        "de",
-		Icon:        app.Icon{SVG: "/web/icon.svg"},
-		Styles:      []string{"/web/app.css"},
+		Icon:        app.Icon{SVG: "/web/icon.svg", Default: "/web/icon.svg", Large: "/web/icon.svg"},
+		Styles:      []string{"/web/app.css", "/web/shell.css"},
+		Scripts:     []string{"/web/shell.js"},
 	}
 
 	handler, err := server.New(server.Config{

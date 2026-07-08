@@ -23,14 +23,20 @@ package nativeserver
 import (
 	"crypto/subtle"
 	"encoding/json"
+	"mime"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/Gerry3010/projecthub/internal/core/domain"
 	"github.com/Gerry3010/projecthub/internal/local"
 	"github.com/Gerry3010/projecthub/internal/ptyhost"
 	"github.com/Gerry3010/projecthub/internal/tabsession"
+	"github.com/Gerry3010/projecthub/internal/tabstate"
 )
 
 // wsBearerPrefix carries the token in the WebSocket handshake's Sec-WebSocket-Protocol
@@ -41,11 +47,13 @@ const wsBearerPrefix = "ph-bearer."
 type Server struct {
 	token string
 	pty   *ptyhost.Host
+	tabs  *tabstate.Store
 }
 
-// New returns a native API server authenticated by token, using pty for terminals.
-func New(token string, pty *ptyhost.Host) *Server {
-	return &Server{token: token, pty: pty}
+// New returns a native API server authenticated by token, using pty for terminals
+// and tabs for the live browser-tab state (fed by the native-messaging host).
+func New(token string, pty *ptyhost.Host, tabs *tabstate.Store) *Server {
+	return &Server{token: token, pty: pty, tabs: tabs}
 }
 
 // Handler builds the routed, auth-protected handler (mount it at /native).
@@ -59,6 +67,13 @@ func (s *Server) Handler() http.Handler {
 	r.Get("/pty/{id}/ws", s.ptyWS)
 	r.Delete("/pty/{id}", s.ptyClose)
 	r.Post("/openin", s.openIn)
+	r.Get("/file", s.fileRead)
+	r.Post("/tabs/ingest", s.tabsIngest)
+	r.Get("/tabs", s.tabsList)
+	r.Post("/projects", s.projectsSet)
+	r.Get("/projects", s.projectsList)
+	r.Post("/tabs/command", s.tabsCommand)
+	r.Get("/tabs/commands", s.tabsCommands)
 	return r
 }
 
@@ -165,6 +180,13 @@ func (s *Server) ptyOpen(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
+	if req.Cmd == "" { // default to the user's login shell
+		if sh := os.Getenv("SHELL"); sh != "" {
+			req.Cmd = sh
+		} else {
+			req.Cmd = "/bin/bash"
+		}
+	}
 	id, err := s.pty.Open(req)
 	if err != nil {
 		httpError(w, err)
@@ -208,6 +230,159 @@ func (s *Server) openIn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// ─── live browser tabs ───────────────────────────────────────────────────────
+
+// tabsIngest records one browser's coupled tab groups, pushed by the native-messaging
+// host (which the browser extension speaks to). The bearer token it presents comes
+// from the sidecar's launch discovery file, so only a host started on this machine can
+// post here.
+func (s *Server) tabsIngest(w http.ResponseWriter, r *http.Request) {
+	if s.tabs == nil {
+		http.Error(w, "tabs unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	var b domain.LiveBrowserGroups
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxTabsBody)).Decode(&b); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if b.Browser == "" {
+		http.Error(w, "missing browser", http.StatusBadRequest)
+		return
+	}
+	s.tabs.Set(b)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// maxTabsBody caps a single tab report so a runaway extension can't exhaust memory.
+const maxTabsBody = 4 << 20 // 4 MiB
+
+// tabsList returns coupled groups for the WASM UI's tabs tile: scoped to one project
+// with ?project=<id>, or every live browser's groups (debugging) without it.
+func (s *Server) tabsList(w http.ResponseWriter, r *http.Request) {
+	if s.tabs == nil {
+		writeJSON(w, []domain.LiveTabGroup{})
+		return
+	}
+	if project := r.URL.Query().Get("project"); project != "" {
+		writeJSON(w, s.tabs.GroupsForProject(project))
+		return
+	}
+	writeJSON(w, s.tabs.Snapshot())
+}
+
+// ─── project roster ─────────────────────────────────────────────────────────────
+
+// maxRosterBody caps the roster push; a project list is tiny, so this is generous.
+const maxRosterBody = 1 << 20 // 1 MiB
+
+// projectsSet is pushed by the unlocked WASM app (id+title only) so the extension
+// popup can list projects to couple tab groups to.
+func (s *Server) projectsSet(w http.ResponseWriter, r *http.Request) {
+	if s.tabs == nil {
+		http.Error(w, "tabs unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	var roster []domain.RosterEntry
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRosterBody)).Decode(&roster); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	s.tabs.SetRoster(roster)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// projectsList returns the current roster for the extension popup.
+func (s *Server) projectsList(w http.ResponseWriter, _ *http.Request) {
+	if s.tabs == nil {
+		writeJSON(w, []domain.RosterEntry{})
+		return
+	}
+	writeJSON(w, s.tabs.Roster())
+}
+
+// ─── tab commands (ProjectHub → extension) ──────────────────────────────────────
+
+// tabsCommand queues a focus/reopen request for the target browser's extension.
+func (s *Server) tabsCommand(w http.ResponseWriter, r *http.Request) {
+	if s.tabs == nil {
+		http.Error(w, "tabs unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	var c domain.TabCommand
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxTabsBody)).Decode(&c); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if c.Browser == "" || c.Action == "" {
+		http.Error(w, "missing browser/action", http.StatusBadRequest)
+		return
+	}
+	s.tabs.Enqueue(c)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// tabsCommands is polled by tabhost (per browser) to relay queued commands to the
+// extension. Draining clears the queue, so each command is delivered once.
+func (s *Server) tabsCommands(w http.ResponseWriter, r *http.Request) {
+	browser := r.URL.Query().Get("browser")
+	if browser == "" {
+		http.Error(w, "missing browser", http.StatusBadRequest)
+		return
+	}
+	if s.tabs == nil {
+		writeJSON(w, []domain.TabCommand{})
+		return
+	}
+	writeJSON(w, s.tabs.DrainCommands(browser))
+}
+
+// ─── local file read ───────────────────────────────────────────────────────────
+
+// maxFileRead caps a single /file response so a huge file can't exhaust memory.
+const maxFileRead = 25 << 20 // 25 MiB
+
+// fileRead serves a local file's bytes: used for the markdown tile's live reload,
+// local background images, and file previews. With ?mtime=<unixnano>, it returns 304
+// if the file is unchanged so pollers stay cheap. Access is gated by the bearer
+// token (loopback), and reads are limited to regular files under maxFileRead.
+func (s *Server) fileRead(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Query().Get("path")
+	if path == "" || !filepath.IsAbs(path) {
+		http.Error(w, "absolute path required", http.StatusBadRequest)
+		return
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	if !fi.Mode().IsRegular() {
+		http.Error(w, "not a regular file", http.StatusBadRequest)
+		return
+	}
+	mtime := fi.ModTime().UnixNano()
+	if q := r.URL.Query().Get("mtime"); q != "" && q == strconv.FormatInt(mtime, 10) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	if fi.Size() > maxFileRead {
+		http.Error(w, "file too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+	if ct := mime.TypeByExtension(filepath.Ext(path)); ct != "" {
+		w.Header().Set("Content-Type", ct)
+	}
+	w.Header().Set("X-Mtime", strconv.FormatInt(mtime, 10))
+	w.Header().Set("Cache-Control", "no-cache")
+	_, _ = w.Write(data)
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
