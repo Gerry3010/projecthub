@@ -54,6 +54,8 @@ type ProjectPage struct {
 	ppLabel     string
 	ppToken     string
 	ppPipeline  string
+	ppEmail     string
+	ppPassword  string
 
 	// note form (doubles as editor when editNoteID != "")
 	newNoteTitle string
@@ -349,7 +351,7 @@ func (p *ProjectPage) codeSessionsSection() app.UI {
 func (p *ProjectPage) pipepushSection() app.UI {
 	return app.Section().Class("ph-section").Body(
 		app.H2().Text("pipepush"),
-		app.P().Class("ph-muted").Text("Ordne dieses Projekt einem pipepush-Projekt zu. Der Token bleibt Ende-zu-Ende verschlüsselt gespeichert."),
+		app.P().Class("ph-muted").Text("Ordne dieses Projekt einem pipepush-Projekt zu. Alles bleibt Ende-zu-Ende verschlüsselt gespeichert."),
 		app.If(p.ppLink != nil, func() app.UI {
 			l := p.ppLink.Val
 			return app.Div().Class("ph-item").Body(
@@ -371,6 +373,9 @@ func (p *ProjectPage) pipepushSection() app.UI {
 				app.Input().Type("text").Placeholder("Label (optional)").Value(p.ppLabel).OnInput(bindInput(&p.ppLabel)),
 				app.Input().Type("text").Placeholder("Pipeline-Name (optional)").Value(p.ppPipeline).OnInput(bindInput(&p.ppPipeline)),
 				app.Input().Type("password").Placeholder("Webhook-Token pp_… (optional)").Value(p.ppToken).OnInput(bindInput(&p.ppToken)),
+				app.P().Class("ph-muted").Text("Für das Pipepush-Tile (Runs lesen) zusätzlich den Account-Login hinterlegen:"),
+				app.Input().Type("text").Placeholder("pipepush-Account-E-Mail").Value(p.ppEmail).OnInput(bindInput(&p.ppEmail)),
+				app.Input().Type("password").Placeholder("pipepush-Account-Passwort").Value(p.ppPassword).OnInput(bindInput(&p.ppPassword)),
 				app.Button().Class("ph-btn").Disabled(p.busy).Text("Verknüpfen").OnClick(p.savePipepushLink),
 			)
 		}),
@@ -391,13 +396,15 @@ func (p *ProjectPage) savePipepushLink(ctx app.Context, _ app.Event) {
 		Label:     p.ppLabel,
 		Token:     strings.TrimSpace(p.ppToken),
 		Pipeline:  strings.TrimSpace(p.ppPipeline),
+		Email:     strings.TrimSpace(p.ppEmail),
+		Password:  p.ppPassword,
 		LinkedAt:  time.Now(),
 	}
 	p.runThen(ctx, func() error {
 		_, err := p.Store.SetPipepushLink(context.Background(), p.Ref.FolderID, link)
 		return err
 	}, func() {
-		p.ppProjectID, p.ppLabel, p.ppToken, p.ppPipeline = "", "", "", ""
+		p.ppProjectID, p.ppLabel, p.ppToken, p.ppPipeline, p.ppEmail, p.ppPassword = "", "", "", "", "", ""
 		p.ppBaseURL = defaultPipepushBaseURL // keep the default ready if the link is later removed
 	})
 }

@@ -158,6 +158,8 @@ func (w *Workspace) addMenu() app.UI {
 		opt("Dateien", domain.TileFiles, nil),
 		opt("Claude-Sessions", domain.TileSessions, nil),
 		opt("Browser-Tabs", domain.TileTabs, nil),
+		opt("Claude", domain.TileClaude, nil),
+		opt("Pipepush", domain.TilePipepush, nil),
 	)
 }
 
@@ -238,6 +240,13 @@ func (w *Workspace) renderTileBody(n *domain.LayoutNode) app.UI {
 			}}
 	case domain.TileTabs:
 		return &tabsTile{Native: w.Native, ProjectID: w.Ref.ID}
+	case domain.TileClaude:
+		return &claudeTile{Native: w.Native, Cwd: w.Ref.LocalPath,
+			OpenClaude: func(ctx app.Context, cwd, prompt string) {
+				w.addTile(domain.TileTerminal, map[string]string{"cwd": cwd, "cmd": "claude", "prompt": prompt})
+			}}
+	case domain.TilePipepush:
+		return &pipepushTile{Store: w.Store, Native: w.Native, FolderID: w.Ref.FolderID}
 	default:
 		return app.Div().Class("ph-muted").Text("Unbekannter Tile-Typ")
 	}
@@ -606,6 +615,10 @@ func tileLabel(n *domain.LayoutNode) string {
 		return "Claude-Sessions"
 	case domain.TileTabs:
 		return "Browser-Tabs"
+	case domain.TileClaude:
+		return "Claude"
+	case domain.TilePipepush:
+		return "Pipepush"
 	}
 	return string(n.Type)
 }

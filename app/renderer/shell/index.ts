@@ -137,7 +137,10 @@ function mountTerminal(el: HTMLElement, params: Record<string, string>): Island 
             (r) => r.pty_id,
           );
         } else {
-          ptyId = await postJSON(nat, "/native/pty", { cwd, cmd: params.cmd || "", args: [], cols, rows }).then(
+          // A "prompt" param (set by the Claude tile's starter) is forwarded as the
+          // sole CLI arg so `claude "<prompt>"` opens straight into that session.
+          const args = params.cmd === "claude" && params.prompt ? [params.prompt] : [];
+          ptyId = await postJSON(nat, "/native/pty", { cwd, cmd: params.cmd || "", args, cols, rows }).then(
             (r) => r.pty_id,
           );
         }

@@ -298,15 +298,52 @@ type CodeSession struct {
 	LastActive time.Time `json:"last_active"`
 }
 
+// TranscriptEntry is one line of a Claude Code session transcript (~/.claude/
+// projects/<cwd>/<sessionId>.jsonl), decoded into structured content blocks.
+// Unlike CodeSession (which only tracks title/cwd/last-active for the session
+// list), this carries every message's content so a tile can render the full
+// conversation — text, thinking, tool calls/results. Never persisted: it is
+// read live off disk by the sidecar (see internal/tabsession.ParseTranscript)
+// and served to the WASM UI over /native/claude/transcript.
+type TranscriptEntry struct {
+	Role        string            `json:"role"` // "user" | "assistant"
+	Timestamp   time.Time         `json:"timestamp"`
+	IsSidechain bool              `json:"is_sidechain,omitempty"`
+	Blocks      []TranscriptBlock `json:"blocks"`
+}
+
+// TranscriptBlock is one content block within a transcript entry's message.
+// Which fields are set depends on Kind: text/thinking use Text; tool_use uses
+// ToolName+ToolInput; tool_result uses Result(+IsError); image uses ImageMIME
+// (the image bytes themselves are not carried — too large for a live view).
+type TranscriptBlock struct {
+	Kind      string `json:"kind"` // "text" | "thinking" | "tool_use" | "tool_result" | "image"
+	Text      string `json:"text,omitempty"`
+	ToolName  string `json:"tool_name,omitempty"`
+	ToolInput string `json:"tool_input,omitempty"`
+	Result    string `json:"result,omitempty"`
+	IsError   bool   `json:"is_error,omitempty"`
+	ImageMIME string `json:"image_mime,omitempty"`
+}
+
 // PipepushLink is the decrypted ph-pipepush payload: it couples a ProjectHub
 // project to a pipepush project plus a webhook token. The token is secret but,
 // like every payload, encrypted at rest in Passbubble. At most one per project.
+//
+// Email/Password are the user's pipepush account credentials, needed to read
+// runs (the pp_… Token below only authorizes the outbound webhook, not reads —
+// see internal/pipepush's package doc). Like everything here they're encrypted
+// at rest in the vault; ProjectHub only sends them to the sidecar's pipepush
+// proxy (internal/nativeserver) which relays them straight to the pipepush
+// server for POST /api/auth/login and never persists them.
 type PipepushLink struct {
 	BaseURL   string    `json:"base_url"`           // e.g. https://pipepush.geraldhofbauer.net
 	ProjectID string    `json:"project_id"`         // pipepush project UUID
 	Label     string    `json:"label,omitempty"`    // human label for the link
 	Token     string    `json:"token,omitempty"`    // pp_… notification token for POST /api/webhook
 	Pipeline  string    `json:"pipeline,omitempty"` // routing name (project-scoped tokens fan out by pipeline)
+	Email     string    `json:"email,omitempty"`    // pipepush account email, for reading runs
+	Password  string    `json:"password,omitempty"` // pipepush account password, for reading runs
 	LinkedAt  time.Time `json:"linked_at"`
 }
 
@@ -333,7 +370,9 @@ const (
 	TileTodo     TileType = "todo"
 	TileFiles    TileType = "files"
 	TileSessions TileType = "sessions"
-	TileTabs     TileType = "tabs" // live open browser tabs, fed by the browser extension
+	TileTabs     TileType = "tabs"     // live open browser tabs, fed by the browser extension
+	TileClaude   TileType = "claude"   // Claude Code chat overview + transcript viewer/starter
+	TilePipepush TileType = "pipepush" // pipepush CI run overview + detail
 )
 
 // Layout is the decrypted ph-layout payload: a project's Warp-style tiling workspace,

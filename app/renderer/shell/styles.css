@@ -122,6 +122,67 @@
 }
 .ph-tabitem:hover .ph-tab-remove { opacity: 1; }
 
+/* Claude tile: session overview (top strip) + transcript detail (scrolls) + a
+   sticky prompt bar at the bottom that starts a real Claude terminal session. */
+.ph-claude { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.ph-cc-overview {
+  flex: 0 0 auto; max-height: 8rem; overflow-y: auto;
+  border-bottom: 1px solid var(--border); margin-bottom: 0.5rem; padding-bottom: 0.4rem;
+}
+.ph-cc-session { cursor: pointer; }
+.ph-cc-session:hover { border-color: var(--accent, #6d8bff); }
+.ph-cc-session-active { border-color: var(--accent, #6d8bff); background: var(--border); }
+.ph-cc-detail { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 0.6rem; }
+.ph-cc-msg { padding: 0.4rem 0.55rem; border: 1px solid var(--border); border-radius: 8px; }
+.ph-cc-role-user { background: color-mix(in srgb, var(--accent, #6d8bff) 8%, transparent); }
+.ph-cc-msghead { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.3rem; }
+.ph-cc-role { font-weight: 600; font-size: 0.82rem; }
+.ph-cc-text { white-space: pre-wrap; word-break: break-word; font-size: 0.88rem; line-height: 1.5; }
+.ph-cc-think {
+  margin: 0.3rem 0; padding: 0.3rem 0.5rem; border-radius: 6px;
+  background: color-mix(in srgb, var(--fg) 6%, transparent); font-size: 0.82rem;
+}
+.ph-cc-think-head {
+  background: none; border: 0; color: var(--muted); cursor: pointer;
+  padding: 0; font-size: 0.82rem; text-align: left;
+}
+.ph-cc-think-body { white-space: pre-wrap; word-break: break-word; color: var(--muted); margin-top: 0.3rem; }
+.ph-cc-tool, .ph-cc-result {
+  margin: 0.3rem 0; border-radius: 6px; border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
+}
+.ph-cc-tool-head, .ph-cc-result-head { padding: 0.25rem 0.5rem; font-size: 0.8rem; color: var(--muted); }
+.ph-cc-tool-input, .ph-cc-result-body {
+  margin: 0; padding: 0.5rem; font-size: 0.78rem; overflow: auto; max-height: 14rem;
+  white-space: pre-wrap; word-break: break-word;
+}
+.ph-cc-result-err { border-color: #ea4335; }
+.ph-cc-result-err .ph-cc-result-head { color: #ea4335; }
+.ph-cc-image { display: inline-block; font-size: 0.82rem; color: var(--muted); margin: 0.2rem 0; }
+.ph-cc-input {
+  flex: 0 0 auto; display: flex; gap: 0.4rem; align-items: flex-end;
+  padding-top: 0.5rem; margin-top: 0.4rem; border-top: 1px solid var(--border);
+}
+.ph-cc-input textarea.ph-island-input { flex: 1; min-height: 2.4rem; resize: vertical; }
+
+/* Pipepush tile: run overview (top strip, newest first) + decrypted run detail. */
+.ph-pp { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.ph-pp-overview {
+  flex: 0 0 auto; max-height: 10rem; overflow-y: auto;
+  border-bottom: 1px solid var(--border); margin-bottom: 0.5rem; padding-bottom: 0.4rem;
+}
+.ph-pp-run { cursor: pointer; gap: 0.5rem; }
+.ph-pp-run:hover { border-color: var(--accent, #6d8bff); }
+.ph-pp-run-active { border-color: var(--accent, #6d8bff); background: var(--border); }
+.ph-pp-status { flex: none; font-size: 1rem; }
+.ph-pp-detail { flex: 1; min-height: 0; overflow-y: auto; }
+.ph-pp-field { margin: 0 0 0.4rem; font-size: 0.88rem; }
+.ph-pp-logs {
+  margin: 0.3rem 0 0; padding: 0.6rem; border-radius: 8px; border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+  font-size: 0.78rem; white-space: pre-wrap; word-break: break-word; overflow: auto; max-height: 20rem;
+}
+
 /* appearance / background panel */
 .ph-appr {
   position: absolute; top: 3rem; right: 0.6rem; z-index: 30;

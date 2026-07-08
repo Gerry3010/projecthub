@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/Gerry3010/projecthub/internal/core/domain"
+	"github.com/Gerry3010/projecthub/internal/pipepush"
 )
 
 // Client talks to the sidecar. Zero value is unusable; use New. A nil *Client is a
@@ -78,6 +79,18 @@ func (c *Client) Suggestions(ctx context.Context) ([]ClaudeSuggestion, error) {
 func (c *Client) Sessions(ctx context.Context, cwd string) ([]domain.CodeSession, error) {
 	var out []domain.CodeSession
 	q := "/native/claude/sessions?cwd=" + url.QueryEscape(cwd)
+	if err := c.get(ctx, q, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// Transcript returns one Claude Code session's full transcript, decoded into
+// structured content blocks (text/thinking/tool_use/tool_result/image), for the
+// Claude tile's chat viewer.
+func (c *Client) Transcript(ctx context.Context, cwd, sessionID string) ([]domain.TranscriptEntry, error) {
+	var out []domain.TranscriptEntry
+	q := "/native/claude/transcript?cwd=" + url.QueryEscape(cwd) + "&session_id=" + url.QueryEscape(sessionID)
 	if err := c.get(ctx, q, &out); err != nil {
 		return nil, err
 	}
@@ -138,6 +151,62 @@ func (c *Client) Browsers(ctx context.Context) ([]string, error) {
 		out = []string{}
 	}
 	return out, nil
+}
+
+// ─── pipepush proxy ──────────────────────────────────────────────────────────
+//
+// pipepush has no CORS, so the WASM UI reaches it only through the sidecar's
+// same-origin relay (see internal/nativeserver's /pipepush/* routes) — every
+// payload it returns stays exactly as encrypted as pipepush sent it; decryption
+// happens here in WASM via internal/pipepush/ppcrypto, never in the sidecar.
+
+// PipepushLogin logs into the pipepush server at base, returning its JWT + the
+// user's encrypted key material (unwrap with ppcrypto.DecryptPrivateKey).
+func (c *Client) PipepushLogin(ctx context.Context, base, email, password string) (*pipepush.LoginResponse, error) {
+	body := map[string]string{"base": base, "email": email, "password": password}
+	var out pipepush.LoginResponse
+	if err := c.post(ctx, "/native/pipepush/login", body, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// PipepushPipelines lists a pipepush project's pipelines, authorized by jwt
+// (from a prior PipepushLogin).
+func (c *Client) PipepushPipelines(ctx context.Context, base, jwt, projectID string) ([]pipepush.PPPipeline, error) {
+	var out []pipepush.PPPipeline
+	q := "/native/pipepush/pipelines?base=" + url.QueryEscape(base) + "&project=" + url.QueryEscape(projectID)
+	if err := c.getAuthed(ctx, q, jwt, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// PipepushRuns lists one pipeline's runs (newest-first, capped at limit),
+// authorized by jwt (from a prior PipepushLogin).
+func (c *Client) PipepushRuns(ctx context.Context, base, jwt, pipelineID string, limit int) ([]pipepush.PPRun, error) {
+	var out []pipepush.PPRun
+	q := fmt.Sprintf("/native/pipepush/runs?base=%s&pipeline=%s&limit=%d",
+		url.QueryEscape(base), url.QueryEscape(pipelineID), limit)
+	if err := c.getAuthed(ctx, q, jwt, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// getAuthed is get, plus an X-PP-Auth header carrying the target pipepush JWT
+// (the sidecar maps it to the upstream Authorization header — do() already
+// sets Authorization to the sidecar's own native bearer, so the two must
+// travel separately).
+func (c *Client) getAuthed(ctx context.Context, path, jwt string, out any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+path, nil)
+	if err != nil {
+		return err
+	}
+	if jwt != "" {
+		req.Header.Set("X-PP-Auth", jwt)
+	}
+	return c.do(req, out)
 }
 
 // FetchFile reads a local file's bytes + content type via the sidecar (used for local

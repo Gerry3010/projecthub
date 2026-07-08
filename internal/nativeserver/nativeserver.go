@@ -21,14 +21,18 @@
 package nativeserver
 
 import (
+	"bytes"
 	"crypto/subtle"
 	"encoding/json"
+	"io"
 	"mime"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -62,6 +66,7 @@ func (s *Server) Handler() http.Handler {
 	r.Use(s.auth)
 	r.Get("/claude/suggestions", s.claudeSuggestions)
 	r.Get("/claude/sessions", s.claudeSessions)
+	r.Get("/claude/transcript", s.claudeTranscript)
 	r.Post("/claude/resume", s.claudeResume)
 	r.Post("/pty", s.ptyOpen)
 	r.Get("/pty/{id}/ws", s.ptyWS)
@@ -75,6 +80,9 @@ func (s *Server) Handler() http.Handler {
 	r.Post("/tabs/command", s.tabsCommand)
 	r.Get("/tabs/commands", s.tabsCommands)
 	r.Get("/tabs/browsers", s.tabsBrowsers)
+	r.Post("/pipepush/login", s.pipepushLogin)
+	r.Get("/pipepush/pipelines", s.pipepushPipelines)
+	r.Get("/pipepush/runs", s.pipepushRuns)
 	return r
 }
 
@@ -143,6 +151,23 @@ func (s *Server) claudeSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, sessions)
+}
+
+// claudeTranscript returns one session's full transcript, decoded into structured
+// content blocks (?cwd=…&session_id=…), for the Claude tile's chat viewer.
+func (s *Server) claudeTranscript(w http.ResponseWriter, r *http.Request) {
+	cwd := r.URL.Query().Get("cwd")
+	sessionID := r.URL.Query().Get("session_id")
+	if cwd == "" || sessionID == "" {
+		http.Error(w, "missing cwd/session_id", http.StatusBadRequest)
+		return
+	}
+	entries, err := tabsession.ParseTranscript(cwd, sessionID)
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+	writeJSON(w, entries)
 }
 
 // claudeResume opens a PTY running `claude --resume <sessionId>` in cwd and returns
@@ -349,6 +374,109 @@ func (s *Server) tabsBrowsers(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	writeJSON(w, s.tabs.Browsers())
+}
+
+// ─── pipepush proxy ──────────────────────────────────────────────────────────
+//
+// pipepush's server has no CORS, so the WASM UI (loaded from the sidecar's own
+// origin) cannot reach it directly cross-origin. These routes are a thin
+// same-origin relay: every payload stays exactly as encrypted as it arrived —
+// the sidecar never sees a decryption key, only forwards the user's login
+// credentials (for the login call) and JWT (via X-PP-Auth, for reads) straight
+// through to the pipepush server the WASM UI names via ?base=. All crypto
+// (KDF, private-key unwrap, payload decrypt) happens in WASM; see
+// internal/pipepush/ppcrypto.
+
+// maxPipepushBody caps the login request body; email+password+base URL is tiny.
+const maxPipepushBody = 4 << 10 // 4 KiB
+
+// pipepushHTTPTimeout bounds a single upstream pipepush call.
+const pipepushHTTPTimeout = 15 * time.Second
+
+// pipepushLogin relays POST /api/auth/login to the pipepush server named in the
+// request body's "base" field, forwarding only email+password upstream.
+func (s *Server) pipepushLogin(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Base     string `json:"base"`
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxPipepushBody)).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if !validPipepushBase(req.Base) || req.Email == "" || req.Password == "" {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	body, _ := json.Marshal(map[string]string{"email": req.Email, "password": req.Password})
+	s.pipepushRelay(w, r, http.MethodPost, strings.TrimRight(req.Base, "/")+"/api/auth/login", bytes.NewReader(body))
+}
+
+// pipepushPipelines relays GET /api/projects/{project}/pipelines
+// (?base=&project=), authorized by the caller's X-PP-Auth JWT.
+func (s *Server) pipepushPipelines(w http.ResponseWriter, r *http.Request) {
+	base := r.URL.Query().Get("base")
+	project := r.URL.Query().Get("project")
+	if !validPipepushBase(base) || project == "" {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	target := strings.TrimRight(base, "/") + "/api/projects/" + url.PathEscape(project) + "/pipelines"
+	s.pipepushRelay(w, r, http.MethodGet, target, nil)
+}
+
+// pipepushRuns relays GET /api/pipelines/{pipeline}/runs?limit=
+// (?base=&pipeline=&limit=), authorized by the caller's X-PP-Auth JWT.
+func (s *Server) pipepushRuns(w http.ResponseWriter, r *http.Request) {
+	base := r.URL.Query().Get("base")
+	pipeline := r.URL.Query().Get("pipeline")
+	if !validPipepushBase(base) || pipeline == "" {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	target := strings.TrimRight(base, "/") + "/api/pipelines/" + url.PathEscape(pipeline) + "/runs"
+	if limit := r.URL.Query().Get("limit"); limit != "" {
+		target += "?limit=" + url.QueryEscape(limit)
+	}
+	s.pipepushRelay(w, r, http.MethodGet, target, nil)
+}
+
+// pipepushRelay issues the upstream request (mapping the caller's X-PP-Auth
+// header, if present, to the upstream Authorization: Bearer) and copies the
+// upstream status/body/content-type straight through — errors included, so the
+// WASM client sees the same message pipepush's own CLI would.
+func (s *Server) pipepushRelay(w http.ResponseWriter, r *http.Request, method, target string, body io.Reader) {
+	req, err := http.NewRequestWithContext(r.Context(), method, target, body)
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if jwt := r.Header.Get("X-PP-Auth"); jwt != "" {
+		req.Header.Set("Authorization", "Bearer "+jwt)
+	}
+	client := &http.Client{Timeout: pipepushHTTPTimeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if ct := resp.Header.Get("Content-Type"); ct != "" {
+		w.Header().Set("Content-Type", ct)
+	}
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
+}
+
+// validPipepushBase requires an absolute http(s) URL, guarding the relay
+// against being pointed at a non-HTTP scheme.
+func validPipepushBase(base string) bool {
+	u, err := url.Parse(base)
+	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
 }
 
 // ─── local file read ───────────────────────────────────────────────────────────
