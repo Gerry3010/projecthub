@@ -31,25 +31,59 @@ import (
 // the sidecar's /native/tabs?project=. It polls a few times a minute (the extension
 // pushes on every group change; the poll just refreshes the view). Clicking a tab
 // focuses it if it's still open (falling back to opening the URL); a group's "öffnen"
-// button focuses or reopens the whole group.
+// button focuses or reopens the whole group. The tile also lets the user manage
+// groups directly — create/rename/recolor/delete a group, add/remove a tab — without
+// going through the browser or the extension popup; every mutation is a TabCommand
+// sent the same way focus/openGroup already are, no optimistic UI needed since the
+// extension's own sync + this tile's poll pick the result up within ~1-2.5s.
 type tabsTile struct {
 	app.Compo
 	Native    *nativeclient.Client // nil in the hosted (non-Electron) build
 	ProjectID string
 
-	groups []domain.LiveTabGroup
-	loaded bool
-	status string
-	stop   chan struct{}
+	groups   []domain.LiveTabGroup
+	loaded   bool
+	status   string
+	stop     chan struct{}
+	browsers []string // live browsers, for the "+ Neue Gruppe" target picker
+
+	// "+ Neue Gruppe" inline form
+	newGroupOpen bool
+	newTitle     string
+	newColor     string
+	newBrowser   string
+	newURL       string
+
+	// per-group inline rename editor; renaming == "" means none open
+	renaming    string
+	renameTitle string
+
+	// per-group inline "+ Tab" input; addingTab == "" means none open
+	addingTab string
+	addTabURL string
 }
 
 const tabsPollInterval = 2500 * time.Millisecond
+
+// chromeGroupColors are every Chrome tab-group color name, offered in the color
+// pickers (create/recolor); see groupColorCSS for their swatch mapping.
+var chromeGroupColors = []string{"grey", "blue", "red", "yellow", "green", "pink", "purple", "cyan", "orange"}
 
 func (t *tabsTile) OnMount(ctx app.Context) {
 	if t.Native == nil {
 		t.loaded = true
 		return
 	}
+	t.newColor = "grey"
+	ctx.Async(func() {
+		browsers, _ := t.Native.Browsers(context.Background())
+		ctx.Dispatch(func(ctx app.Context) {
+			t.browsers = browsers
+			if t.newBrowser == "" && len(browsers) > 0 {
+				t.newBrowser = browsers[0]
+			}
+		})
+	})
 	t.stop = make(chan struct{})
 	ctx.Async(func() {
 		for {
@@ -124,6 +158,115 @@ func (t *tabsTile) openGroup(g domain.LiveTabGroup) app.EventHandler {
 	}
 }
 
+// send is the shared fire-and-forget path for every group-management command: unlike
+// focusTab/openGroup there is no OpenIn fallback (creating/editing a group is
+// meaningless without the extension), so a failure just surfaces via the next poll
+// showing no change.
+func (t *tabsTile) send(cmd domain.TabCommand) {
+	if t.Native == nil {
+		return
+	}
+	native := t.Native
+	go func() { _ = native.SendCommand(context.Background(), cmd) }()
+}
+
+// ─── "+ Neue Gruppe" ──────────────────────────────────────────────────────────
+
+func (t *tabsTile) toggleNewGroup(ctx app.Context, _ app.Event) {
+	t.newGroupOpen = !t.newGroupOpen
+}
+func (t *tabsTile) setNewTitle(ctx app.Context, e app.Event) {
+	t.newTitle = ctx.JSSrc().Get("value").String()
+}
+func (t *tabsTile) setNewColor(ctx app.Context, e app.Event) {
+	t.newColor = ctx.JSSrc().Get("value").String()
+}
+func (t *tabsTile) setNewBrowser(ctx app.Context, e app.Event) {
+	t.newBrowser = ctx.JSSrc().Get("value").String()
+}
+func (t *tabsTile) setNewURL(ctx app.Context, e app.Event) {
+	t.newURL = ctx.JSSrc().Get("value").String()
+}
+
+func (t *tabsTile) submitNewGroup(ctx app.Context, _ app.Event) {
+	if t.newTitle == "" || t.newBrowser == "" {
+		return
+	}
+	cmd := domain.TabCommand{
+		Browser: t.newBrowser, Action: "createGroup",
+		Title: t.newTitle, Color: t.newColor, ProjectID: t.ProjectID,
+	}
+	if t.newURL != "" {
+		cmd.URLs = []string{t.newURL}
+	}
+	t.send(cmd)
+	t.newGroupOpen, t.newTitle, t.newURL = false, "", ""
+}
+
+// ─── per-group management (rename / recolor / delete / add-tab / remove-tab) ──
+
+func (t *tabsTile) startRename(g domain.LiveTabGroup) app.EventHandler {
+	return func(ctx app.Context, _ app.Event) {
+		t.renaming, t.renameTitle = g.GroupKey, g.Title
+	}
+}
+func (t *tabsTile) setRenameTitle(ctx app.Context, e app.Event) {
+	t.renameTitle = ctx.JSSrc().Get("value").String()
+}
+func (t *tabsTile) cancelRename(ctx app.Context, _ app.Event) { t.renaming = "" }
+func (t *tabsTile) submitRename(g domain.LiveTabGroup) app.EventHandler {
+	return func(ctx app.Context, _ app.Event) {
+		if t.renameTitle != "" {
+			t.send(domain.TabCommand{
+				Browser: g.Browser, Action: "renameGroup",
+				GroupID: g.GroupID, GroupKey: g.GroupKey, Title: t.renameTitle,
+			})
+		}
+		t.renaming = ""
+	}
+}
+
+func (t *tabsTile) recolorGroup(g domain.LiveTabGroup) app.EventHandler {
+	return func(ctx app.Context, _ app.Event) {
+		t.send(domain.TabCommand{
+			Browser: g.Browser, Action: "recolorGroup",
+			GroupID: g.GroupID, Color: ctx.JSSrc().Get("value").String(),
+		})
+	}
+}
+
+func (t *tabsTile) deleteGroup(g domain.LiveTabGroup) app.EventHandler {
+	return func(ctx app.Context, _ app.Event) {
+		t.send(domain.TabCommand{
+			Browser: g.Browser, Action: "deleteGroup", GroupID: g.GroupID, GroupKey: g.GroupKey,
+		})
+	}
+}
+
+func (t *tabsTile) startAddTab(g domain.LiveTabGroup) app.EventHandler {
+	return func(ctx app.Context, _ app.Event) {
+		t.addingTab, t.addTabURL = g.GroupKey, ""
+	}
+}
+func (t *tabsTile) setAddTabURL(ctx app.Context, e app.Event) {
+	t.addTabURL = ctx.JSSrc().Get("value").String()
+}
+func (t *tabsTile) cancelAddTab(ctx app.Context, _ app.Event) { t.addingTab = "" }
+func (t *tabsTile) submitAddTab(g domain.LiveTabGroup) app.EventHandler {
+	return func(ctx app.Context, _ app.Event) {
+		t.send(domain.TabCommand{Browser: g.Browser, Action: "addTab", GroupID: g.GroupID, URL: t.addTabURL})
+		t.addingTab = ""
+	}
+}
+
+// removeTab stops the click from bubbling to the tab row's own focusTab handler.
+func (t *tabsTile) removeTab(browser string, tabID int) app.EventHandler {
+	return func(ctx app.Context, e app.Event) {
+		e.StopImmediatePropagation()
+		t.send(domain.TabCommand{Browser: browser, Action: "removeTab", TabID: tabID})
+	}
+}
+
 func (t *tabsTile) Render() app.UI {
 	if t.Native == nil {
 		return app.Div().Class("ph-tilecontent").Body(
@@ -132,43 +275,155 @@ func (t *tabsTile) Render() app.UI {
 	}
 	return app.Div().Class("ph-tilecontent").Body(
 		app.If(t.status != "", func() app.UI { return app.P().Class("ph-err").Text(t.status) }),
-		app.Range(t.groups).Slice(func(i int) app.UI {
-			g := t.groups[i]
-			return app.Div().Class("ph-tabgroup").Body(
-				app.Div().Class("ph-tabgroup-head").Body(
-					groupColorChip(g.Color),
-					browserIcon(g.Browser, 14),
-					app.Span().Class("ph-title").Text(orText(g.Title, "(ohne Titel)")),
-					app.Span().Class("ph-muted").Text(fmt.Sprintf("%d", len(g.Tabs))),
-					app.Div().Class("ph-spacer"),
-					app.Button().Class("ph-tile-btn").Title("Gruppe öffnen/fokussieren").Text("↗").
-						OnClick(t.openGroup(g)),
-				),
-				app.Ul().Class("ph-list").Body(
-					app.Range(g.Tabs).Slice(func(j int) app.UI {
-						tab := g.Tabs[j]
-						cls := "ph-item ph-tabitem"
-						if tab.Active {
-							cls += " ph-tab-active"
-						}
-						return app.Li().Class(cls).Title(tab.URL).
-							OnClick(t.focusTab(g.Browser, tab.URL, tab.TabID, tab.WindowID)).Body(
-							tabFavicon(tab.FavIconURL),
-							app.Div().Class("ph-suggest-info").Body(
-								app.Span().Class("ph-title").Text(orText(tab.Title, tab.URL)),
-								app.Span().Class("ph-muted ph-taburl").Text(shortURL(tab.URL)),
-							),
-							app.If(tab.Pinned, func() app.UI {
-								return app.Span().Class("ph-tabpin").Title("angepinnt").Text("📌")
-							}),
-						)
-					}),
-				),
+		t.tabsHeader(),
+		app.If(t.newGroupOpen, t.newGroupForm),
+		app.Range(t.groups).Slice(func(i int) app.UI { return t.renderGroup(t.groups[i]) }),
+		app.If(t.loaded && len(t.groups) == 0 && t.status == "", func() app.UI {
+			return app.P().Class("ph-muted").Text("Noch keine Tab-Gruppe gekoppelt — im Extension-Popup zuordnen, oder oben eine neue anlegen.")
+		}),
+	)
+}
+
+// tabsHeader is the tile-wide "+ Neue Gruppe" toggle.
+func (t *tabsTile) tabsHeader() app.UI {
+	label := "+ Neue Gruppe"
+	if t.newGroupOpen {
+		label = "✕ Abbrechen"
+	}
+	return app.Div().Class("ph-tabs-head").Body(
+		app.Button().Class("ph-tile-btn").Title("Neue Tab-Gruppe anlegen").Text(label).
+			OnClick(t.toggleNewGroup),
+	)
+}
+
+// newGroupForm is the inline "+ Neue Gruppe" form: title, color, target browser (only
+// shown when more than one browser is live — otherwise it's implied), optional first URL.
+func (t *tabsTile) newGroupForm() app.UI {
+	return app.Div().Class("ph-newgroup-form").Body(
+		app.Input().Class("ph-island-input").Type("text").Placeholder("Gruppenname").
+			Value(t.newTitle).OnChange(t.setNewTitle),
+		colorSelect(t.newColor, t.setNewColor),
+		app.If(len(t.browsers) > 1, func() app.UI {
+			return app.Select().Class("ph-island-input").OnChange(t.setNewBrowser).Body(
+				app.Range(t.browsers).Slice(func(i int) app.UI {
+					b := t.browsers[i]
+					return app.Option().Value(b).Selected(b == t.newBrowser).Text(browserLabel(b))
+				}),
 			)
 		}),
-		app.If(t.loaded && len(t.groups) == 0 && t.status == "", func() app.UI {
-			return app.P().Class("ph-muted").Text("Noch keine Tab-Gruppe gekoppelt — im Extension-Popup zuordnen.")
+		app.Input().Class("ph-island-input").Type("text").Placeholder("erste URL (optional)").
+			Value(t.newURL).OnChange(t.setNewURL),
+		app.Button().Class("ph-btn").Text("Anlegen").
+			Disabled(t.newTitle == "" || t.newBrowser == "").
+			OnClick(t.submitNewGroup),
+	)
+}
+
+// colorSelect renders a Chrome tab-group color <select>, shared by the create form and
+// each group's recolor control.
+func colorSelect(current string, onChange app.EventHandler) app.UI {
+	return app.Select().Class("ph-island-input ph-color-select").OnChange(onChange).Body(
+		app.Range(chromeGroupColors).Slice(func(i int) app.UI {
+			c := chromeGroupColors[i]
+			return app.Option().Value(c).Selected(c == current).Text(colorLabel(c))
 		}),
+	)
+}
+
+// colorLabel is the German label for a Chrome tab-group color name.
+func colorLabel(name string) string {
+	switch name {
+	case "grey":
+		return "Grau"
+	case "blue":
+		return "Blau"
+	case "red":
+		return "Rot"
+	case "yellow":
+		return "Gelb"
+	case "green":
+		return "Grün"
+	case "pink":
+		return "Pink"
+	case "purple":
+		return "Violett"
+	case "cyan":
+		return "Cyan"
+	case "orange":
+		return "Orange"
+	default:
+		return name
+	}
+}
+
+// renderGroup renders one coupled tab group: header (chip, browser icon, title/rename
+// editor, count, öffnen/umfärben/umbenennen/löschen), then its tabs (each with a focus
+// click + a remove button), then the inline "+ Tab" row when active.
+func (t *tabsTile) renderGroup(g domain.LiveTabGroup) app.UI {
+	return app.Div().Class("ph-tabgroup").Body(
+		app.Div().Class("ph-tabgroup-head").Body(
+			groupColorChip(g.Color),
+			browserIcon(g.Browser, 14),
+			app.If(t.renaming == g.GroupKey, func() app.UI { return t.renameEditor(g) }).
+				Else(func() app.UI { return app.Span().Class("ph-title").Text(orText(g.Title, "(ohne Titel)")) }),
+			app.Span().Class("ph-muted").Text(fmt.Sprintf("%d", len(g.Tabs))),
+			app.Div().Class("ph-spacer"),
+			app.If(t.renaming != g.GroupKey, func() app.UI {
+				return app.Button().Class("ph-tile-btn").Title("umbenennen").Text("✎").OnClick(t.startRename(g))
+			}),
+			colorSelect(g.Color, t.recolorGroup(g)),
+			app.Button().Class("ph-tile-btn").Title("Tab hinzufügen").Text("+").OnClick(t.startAddTab(g)),
+			app.Button().Class("ph-tile-btn").Title("Gruppe öffnen/fokussieren").Text("↗").
+				OnClick(t.openGroup(g)),
+			app.Button().Class("ph-tile-btn ph-tile-btn-danger").Title("Gruppe löschen (schließt ihre Tabs)").Text("🗑").
+				OnClick(t.deleteGroup(g)),
+		),
+		app.If(t.addingTab == g.GroupKey, func() app.UI { return t.addTabRow(g) }),
+		app.Ul().Class("ph-list").Body(
+			app.Range(g.Tabs).Slice(func(j int) app.UI { return t.renderTab(g, g.Tabs[j]) }),
+		),
+	)
+}
+
+// renameEditor replaces the group title with an inline text input + confirm/cancel.
+func (t *tabsTile) renameEditor(g domain.LiveTabGroup) app.UI {
+	return app.Div().Class("ph-inline-edit").Body(
+		app.Input().Class("ph-island-input").Type("text").Value(t.renameTitle).
+			OnChange(t.setRenameTitle).Attr("autofocus", true),
+		app.Button().Class("ph-tile-btn").Title("übernehmen").Text("✓").OnClick(t.submitRename(g)),
+		app.Button().Class("ph-tile-btn").Title("abbrechen").Text("✕").OnClick(t.cancelRename),
+	)
+}
+
+// addTabRow is the inline "+ Tab" URL input shown below a group's header.
+func (t *tabsTile) addTabRow(g domain.LiveTabGroup) app.UI {
+	return app.Div().Class("ph-inline-edit").Body(
+		app.Input().Class("ph-island-input").Type("text").Placeholder("https:// (leer = neuer Tab)").
+			Value(t.addTabURL).OnChange(t.setAddTabURL).Attr("autofocus", true),
+		app.Button().Class("ph-tile-btn").Title("Tab hinzufügen").Text("✓").OnClick(t.submitAddTab(g)),
+		app.Button().Class("ph-tile-btn").Title("abbrechen").Text("✕").OnClick(t.cancelAddTab),
+	)
+}
+
+// renderTab renders one tab row: click focuses it, the × button removes it from the
+// group (closing the tab) without triggering the focus click.
+func (t *tabsTile) renderTab(g domain.LiveTabGroup, tab domain.LiveTab) app.UI {
+	cls := "ph-item ph-tabitem"
+	if tab.Active {
+		cls += " ph-tab-active"
+	}
+	return app.Li().Class(cls).Title(tab.URL).
+		OnClick(t.focusTab(g.Browser, tab.URL, tab.TabID, tab.WindowID)).Body(
+		tabFavicon(tab.FavIconURL),
+		app.Div().Class("ph-suggest-info").Body(
+			app.Span().Class("ph-title").Text(orText(tab.Title, tab.URL)),
+			app.Span().Class("ph-muted ph-taburl").Text(shortURL(tab.URL)),
+		),
+		app.If(tab.Pinned, func() app.UI {
+			return app.Span().Class("ph-tabpin").Title("angepinnt").Text("📌")
+		}),
+		app.Button().Class("ph-tile-btn ph-tab-remove").Title("Tab entfernen (schließt ihn)").Text("×").
+			OnClick(t.removeTab(g.Browser, tab.TabID)),
 	)
 }
 

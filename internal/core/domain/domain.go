@@ -257,15 +257,25 @@ type RosterEntry struct {
 }
 
 // TabCommand is a ProjectHub → extension request (via the sidecar command queue and the
-// native-messaging host) to act on a live tab/group in the browser.
+// native-messaging host) to act on a live tab/group in the browser. Actions:
+// "focusTab" | "focusGroup" | "openGroup" | "createGroup" | "deleteGroup" | "renameGroup" |
+// "recolorGroup" | "addTab" | "removeTab".
 type TabCommand struct {
 	Browser  string   `json:"browser"`
-	Action   string   `json:"action"` // "focusTab" | "focusGroup" | "openGroup"
+	Action   string   `json:"action"`
 	TabID    int      `json:"tab_id,omitempty"`
 	WindowID int      `json:"window_id,omitempty"`
 	GroupID  int      `json:"group_id,omitempty"`
 	GroupKey string   `json:"group_key,omitempty"`
 	URLs     []string `json:"urls,omitempty"` // fallback for reopening a closed group
+
+	// Title/Color/ProjectID/URL back createGroup/renameGroup/recolorGroup/addTab: Title
+	// names a new or renamed group, Color is a Chrome tab-group color name, ProjectID
+	// couples a freshly created group to a project, URL is the tab to add.
+	Title     string `json:"title,omitempty"`
+	Color     string `json:"color,omitempty"`
+	ProjectID string `json:"project_id,omitempty"`
+	URL       string `json:"url,omitempty"`
 }
 
 // PinnedItem is the decrypted ph-pin payload: a reference to a local file/dir,

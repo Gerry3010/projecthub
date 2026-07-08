@@ -118,6 +118,26 @@ func (s *Store) GroupsForProject(projectID string) []domain.LiveTabGroup {
 	return out
 }
 
+// Browsers returns the ids of every non-stale browser currently reporting in (e.g.
+// "chrome", "brave"), sorted, never nil. Used by the "+ Neue Gruppe" UI to offer a
+// target browser when the project has no existing coupled group to infer one from.
+// Evicts stale browsers as a side effect, same as Snapshot.
+func (s *Store) Browsers() []string {
+	cutoff := s.now().Add(-s.ttl)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, 0, len(s.by))
+	for name, b := range s.by {
+		if b.UpdatedAt.Before(cutoff) {
+			delete(s.by, name)
+			continue
+		}
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // ─── project roster ─────────────────────────────────────────────────────────────
 
 // SetRoster replaces the project roster (pushed by the unlocked WASM app).

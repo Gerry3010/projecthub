@@ -120,9 +120,24 @@ func (c *Client) SetProjects(ctx context.Context, roster []domain.RosterEntry) e
 	return c.post(ctx, "/native/projects", roster, nil)
 }
 
-// SendCommand asks the target browser's extension to focus or reopen a tab/group.
+// SendCommand asks the target browser's extension to focus, reopen, or manage a
+// tab/group (create/delete/rename/recolor a group, add/remove a tab).
 func (c *Client) SendCommand(ctx context.Context, cmd domain.TabCommand) error {
 	return c.post(ctx, "/native/tabs/command", cmd, nil)
+}
+
+// Browsers lists the browsers currently reporting in (e.g. "chrome", "brave"), never
+// nil. Used to offer a target browser when creating a new tab group for a project that
+// has no existing coupled group to infer one from.
+func (c *Client) Browsers(ctx context.Context) ([]string, error) {
+	var out []string
+	if err := c.get(ctx, "/native/tabs/browsers", &out); err != nil {
+		return nil, err
+	}
+	if out == nil {
+		out = []string{}
+	}
+	return out, nil
 }
 
 // FetchFile reads a local file's bytes + content type via the sidecar (used for local

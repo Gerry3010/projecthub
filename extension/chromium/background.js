@@ -164,6 +164,18 @@ async function runCommand(cmd) {
       if (cmd.window_id) await chrome.windows.update(cmd.window_id, { focused: true });
     } else if (cmd.action === "focusGroup" || cmd.action === "openGroup") {
       await focusOrReopenGroup(cmd);
+    } else if (cmd.action === "createGroup") {
+      await createGroup(cmd);
+    } else if (cmd.action === "deleteGroup") {
+      await deleteGroup(cmd);
+    } else if (cmd.action === "renameGroup") {
+      await renameGroup(cmd);
+    } else if (cmd.action === "recolorGroup") {
+      await chrome.tabGroups.update(cmd.group_id, { color: cmd.color });
+    } else if (cmd.action === "addTab") {
+      await addTab(cmd);
+    } else if (cmd.action === "removeTab") {
+      await chrome.tabs.remove(cmd.tab_id);
     }
   } catch (e) {
     // best-effort — ProjectHub falls back to opening the URL directly if this fails
@@ -195,6 +207,60 @@ async function focusOrReopenGroup(cmd) {
   await chrome.tabGroups.update(groupId, { title: cmd.group_key || "" });
   const tabs = await chrome.tabs.query({ groupId });
   if (tabs.length) await chrome.tabs.update(tabs[0].id, { active: true });
+}
+
+// ─── tab-group management (ProjectHub app → extension) ───────────────────────────
+
+async function setCouplingRaw(groupTitle, projectId) {
+  const { couplings = {} } = await chrome.storage.local.get("couplings");
+  if (projectId) {
+    couplings[groupTitle] = projectId;
+  } else {
+    delete couplings[groupTitle];
+  }
+  await chrome.storage.local.set({ couplings });
+}
+
+// createGroup makes a brand-new tab group (one blank tab if no URLs were given) and
+// immediately couples it to the requesting ProjectHub project, so it shows up in the
+// tile on the very next sync.
+async function createGroup(cmd) {
+  const urls = cmd.urls && cmd.urls.length ? cmd.urls : [undefined];
+  const created = [];
+  for (const url of urls) {
+    const tab = await chrome.tabs.create({ url, active: false });
+    created.push(tab.id);
+  }
+  const groupId = await chrome.tabs.group({ tabIds: created });
+  const title = cmd.title || "";
+  await chrome.tabGroups.update(groupId, { title, color: cmd.color || "grey" });
+  if (title && cmd.project_id) await setCouplingRaw(title, cmd.project_id);
+}
+
+// deleteGroup closes every tab in the group (real "gone", not just ungrouping) and
+// drops its coupling.
+async function deleteGroup(cmd) {
+  const tabs = await chrome.tabs.query({ groupId: cmd.group_id });
+  if (tabs.length) await chrome.tabs.remove(tabs.map((t) => t.id));
+  if (cmd.group_key) await setCouplingRaw(cmd.group_key, null);
+}
+
+// renameGroup updates the group's title and migrates its coupling key (coupling is
+// title-based), so the rename doesn't silently decouple the group.
+async function renameGroup(cmd) {
+  await chrome.tabGroups.update(cmd.group_id, { title: cmd.title || "" });
+  if (!cmd.group_key || !cmd.title || cmd.group_key === cmd.title) return;
+  const { couplings = {} } = await chrome.storage.local.get("couplings");
+  if (!(cmd.group_key in couplings)) return;
+  couplings[cmd.title] = couplings[cmd.group_key];
+  delete couplings[cmd.group_key];
+  await chrome.storage.local.set({ couplings });
+}
+
+// addTab opens a new tab (blank if no URL given) inside an existing group.
+async function addTab(cmd) {
+  const tab = await chrome.tabs.create({ url: cmd.url || undefined, active: false });
+  await chrome.tabs.group({ groupId: cmd.group_id, tabIds: [tab.id] });
 }
 
 // ─── popup messaging ────────────────────────────────────────────────────────────

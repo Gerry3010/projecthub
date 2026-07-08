@@ -105,6 +105,23 @@
 }
 .ph-tabpin { flex: none; font-size: 0.75rem; }
 
+.ph-tabs-head { display: flex; margin-bottom: 0.5rem; }
+.ph-newgroup-form {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem;
+  margin: 0 0 0.7rem; padding: 0.5rem; background: var(--card);
+  border: 1px solid var(--border); border-radius: 8px;
+}
+.ph-newgroup-form .ph-island-input { width: auto; flex: 1 1 8rem; }
+.ph-color-select { flex: 0 0 auto; width: auto; max-width: 6.5rem; }
+.ph-tabgroup-head .ph-tile-btn-danger:hover { border-color: #ea4335; color: #ea4335; }
+.ph-inline-edit { display: flex; align-items: center; gap: 0.3rem; margin: 0 0 0.4rem; }
+.ph-inline-edit .ph-island-input { flex: 1; }
+.ph-tabitem .ph-tab-remove {
+  flex: none; margin-left: auto; padding: 0.05rem 0.4rem; font-size: 0.9rem;
+  opacity: 0; transition: opacity 0.1s;
+}
+.ph-tabitem:hover .ph-tab-remove { opacity: 1; }
+
 /* appearance / background panel */
 .ph-appr {
   position: absolute; top: 3rem; right: 0.6rem; z-index: 30;

@@ -153,3 +153,68 @@ func TestTabsCommandsRequiresBrowserParam(t *testing.T) {
 		t.Fatalf("want 400 without browser param, got %d", rec.Code)
 	}
 }
+
+func TestTabsBrowsersEndpoint(t *testing.T) {
+	h := newTestServer()
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, authedReq(http.MethodGet, "/tabs/browsers", nil))
+	var got []string
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("fresh server should report no browsers, got %v", got)
+	}
+
+	body, _ := json.Marshal(domain.LiveBrowserGroups{Browser: "brave", Groups: []domain.LiveTabGroup{
+		{ProjectID: "p1", GroupKey: "G", Title: "G"},
+	}})
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, authedReq(http.MethodPost, "/tabs/ingest", body))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("ingest: want 204, got %d", rec.Code)
+	}
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, authedReq(http.MethodGet, "/tabs/browsers", nil))
+	got = nil
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got) != 1 || got[0] != "brave" {
+		t.Fatalf("expected [brave], got %v", got)
+	}
+}
+
+// TestTabsCommandGroupManagementFieldsRoundtrip confirms the enqueue/drain handler is
+// action-agnostic: the new group-management fields (Title/Color/ProjectID/URL) survive
+// the JSON roundtrip through the queue untouched, same as the existing focus/openGroup
+// fields — no server-side change was needed to support them.
+func TestTabsCommandGroupManagementFieldsRoundtrip(t *testing.T) {
+	h := newTestServer()
+	body, _ := json.Marshal(domain.TabCommand{
+		Browser: "brave", Action: "createGroup",
+		Title: "Mission WS", Color: "blue", ProjectID: "p1",
+	})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, authedReq(http.MethodPost, "/tabs/command", body))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("enqueue: want 204, got %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, authedReq(http.MethodGet, "/tabs/commands?browser=brave", nil))
+	var got []domain.TabCommand
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 command, got %+v", got)
+	}
+	c := got[0]
+	if c.Action != "createGroup" || c.Title != "Mission WS" || c.Color != "blue" || c.ProjectID != "p1" {
+		t.Fatalf("unexpected roundtripped command: %+v", c)
+	}
+}

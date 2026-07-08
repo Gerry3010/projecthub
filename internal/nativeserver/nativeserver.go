@@ -74,6 +74,7 @@ func (s *Server) Handler() http.Handler {
 	r.Get("/projects", s.projectsList)
 	r.Post("/tabs/command", s.tabsCommand)
 	r.Get("/tabs/commands", s.tabsCommands)
+	r.Get("/tabs/browsers", s.tabsBrowsers)
 	return r
 }
 
@@ -337,6 +338,17 @@ func (s *Server) tabsCommands(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, s.tabs.DrainCommands(browser))
+}
+
+// tabsBrowsers lists the browsers currently reporting in (e.g. "chrome", "brave"), for
+// the "+ Neue Gruppe" UI to offer a target browser when the project has no existing
+// coupled group to infer one from.
+func (s *Server) tabsBrowsers(w http.ResponseWriter, _ *http.Request) {
+	if s.tabs == nil {
+		writeJSON(w, []string{})
+		return
+	}
+	writeJSON(w, s.tabs.Browsers())
 }
 
 // ─── local file read ───────────────────────────────────────────────────────────

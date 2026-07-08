@@ -75,6 +75,29 @@ func TestRosterRoundtrip(t *testing.T) {
 	}
 }
 
+func TestBrowsers(t *testing.T) {
+	s := New()
+	if got := s.Browsers(); len(got) != 0 {
+		t.Fatalf("fresh store should report no browsers, got %v", got)
+	}
+	s.Set(domain.LiveBrowserGroups{Browser: "chrome", Groups: []domain.LiveTabGroup{group("p1", "G")}})
+	s.Set(domain.LiveBrowserGroups{Browser: "brave", Groups: []domain.LiveTabGroup{group("p1", "G2")}})
+	got := s.Browsers()
+	if len(got) != 2 || got[0] != "brave" || got[1] != "chrome" {
+		t.Fatalf("expected sorted [brave chrome], got %v", got)
+	}
+}
+
+func TestBrowsersEvictsStale(t *testing.T) {
+	now := time.Unix(1000, 0)
+	s := &Store{ttl: 30 * time.Second, now: func() time.Time { return now }, by: map[string]domain.LiveBrowserGroups{}, cmds: map[string][]domain.TabCommand{}}
+	s.Set(domain.LiveBrowserGroups{Browser: "chrome", Groups: []domain.LiveTabGroup{group("p1", "G")}})
+	now = now.Add(31 * time.Second)
+	if got := s.Browsers(); len(got) != 0 {
+		t.Fatalf("stale browser should be evicted, got %v", got)
+	}
+}
+
 func TestCommandQueue(t *testing.T) {
 	s := New()
 	s.Enqueue(domain.TabCommand{Browser: "chrome", Action: "focusTab", TabID: 7})
