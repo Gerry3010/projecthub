@@ -40,6 +40,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -115,8 +117,29 @@ func main() {
 	tabs := tabstate.New()
 	native := nativeserver.New(token, ptys, tabs)
 
+	// The Passbubble upstream is runtime-swappable and device-local: a persisted
+	// override (set in the login screen's Server field) wins over PASSBUBBLE_URL, so
+	// the choice survives restarts and logouts without an env var.
+	initialURL := pbURL
+	if saved := loadServerURL(); saved != "" {
+		initialURL = saved
+	}
+	target, err := server.NewPBTarget(initialURL)
+	if err != nil {
+		log.Fatalf("passbubble url %q: %v", initialURL, err)
+	}
+	native.SetServerHooks(
+		func() string { return target.String() },
+		func(raw string) error {
+			if err := target.Set(raw); err != nil {
+				return err
+			}
+			return saveServerURL(target.String())
+		},
+	)
+
 	handler, err := server.New(server.Config{
-		PassbubbleURL: pbURL,
+		PBTarget:      target,
 		WebHandler:    webHandler,
 		NativeHandler: native.Handler(),
 		Embedded:      true,
@@ -146,7 +169,7 @@ func main() {
 	} else if len(written) > 0 {
 		log.Printf("native host manifest installed for %d browser(s)", len(written))
 	}
-	log.Printf("sidecar on 127.0.0.1:%d (proxying /pb → %s)", port, pbURL)
+	log.Printf("sidecar on 127.0.0.1:%d (proxying /pb → %s)", port, target.String())
 
 	cleanup := func(reason string) {
 		log.Printf("%s — shutting down", reason)
@@ -206,4 +229,38 @@ func env(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// serverURLPath is where the device-local Passbubble upstream override lives, next to
+// the discovery file (<user-config-dir>/projecthub/server.url). It is account-
+// independent — persists across logouts — and plain text (the URL isn't a secret).
+func serverURLPath() (string, error) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "projecthub", "server.url"), nil
+}
+
+func loadServerURL() string {
+	p, err := serverURLPath()
+	if err != nil {
+		return ""
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
+func saveServerURL(raw string) error {
+	p, err := serverURLPath()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(p, []byte(raw+"\n"), 0o600)
 }

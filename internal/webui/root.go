@@ -50,6 +50,12 @@ type Root struct {
 	remember bool   // "stay signed in on this device" — persist creds in localStorage
 	status   string // error/info message
 
+	// server is the Passbubble upstream URL, editable on the login screen (desktop
+	// only). serverEditable gates the field; the value is device-local (persisted by
+	// the sidecar), independent of any account, and survives logout.
+	server         string
+	serverEditable bool
+
 	// session state (populated after unlock)
 	busy     bool
 	unlocked bool
@@ -112,6 +118,17 @@ func (r *Root) OnMount(ctx app.Context) {
 		return
 	}
 	r.email = lsGet("ph.email")
+	// Under the desktop shell, expose + prefill the Passbubble server field from the
+	// sidecar (device-local override; independent of the account and of logout).
+	if base, token := readPhNative(); base != "" && token != "" {
+		r.serverEditable = true
+		nc := nativeclient.New(base, token)
+		ctx.Async(func() {
+			if url, err := nc.Server(context.Background()); err == nil && url != "" {
+				ctx.Dispatch(func(ctx app.Context) { r.server = url })
+			}
+		})
+	}
 	if lsGet("ph.remember") == "1" {
 		r.remember = true
 		r.password = lsGet("ph.pw")
@@ -146,6 +163,17 @@ func (r *Root) loginView() app.UI {
 			),
 			app.Button().Class("ph-btn").Disabled(r.busy).Text(btnLabel(r.busy, "Entsperren", "Entschlüssele…")).
 				OnClick(r.login),
+			app.If(r.serverEditable, func() app.UI {
+				// Server field (desktop only): the Passbubble upstream. In a disclosure
+				// so it stays out of the way; device-local + survives logout.
+				return app.Details().Class("ph-server").Body(
+					app.Summary().Text("Server"),
+					app.Input().Type("text").Class("ph-server-input").
+						Placeholder("https://passbubble.example.net").Value(r.server).ID("ph-server").
+						Attr("autocomplete", "off").Attr("spellcheck", "false").
+						OnInput(r.bind(&r.server)),
+				)
+			}),
 			app.If(r.status != "", func() app.UI { return app.P().Class("ph-err").Text(r.status) }),
 		),
 	)
@@ -162,9 +190,17 @@ func (r *Root) doLogin(ctx app.Context) {
 		return
 	}
 	r.busy, r.status = true, ""
-	email, password := r.email, r.password
+	email, password, serverURL := r.email, r.password, r.server
 
 	ctx.Async(func() {
+		// Point the sidecar's /pb proxy at the chosen server first, so this login (and
+		// everything after) talks to it. Takes effect immediately, no restart.
+		if base, token := readPhNative(); base != "" && token != "" && serverURL != "" {
+			if err := nativeclient.New(base, token).SetServer(context.Background(), serverURL); err != nil {
+				r.fail(ctx, "Server ungültig: "+err.Error())
+				return
+			}
+		}
 		api := pbclient.New(apiBase)
 		resp, err := api.Login(context.Background(), pbclient.LoginRequest{Email: email, Password: password})
 		if err != nil {

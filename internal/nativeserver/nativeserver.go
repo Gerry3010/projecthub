@@ -52,12 +52,24 @@ type Server struct {
 	token string
 	pty   *ptyhost.Host
 	tabs  *tabstate.Store
+
+	// getServer/setServer back the /server endpoint: the desktop UI reads and
+	// changes the Passbubble upstream (device-local, account-independent). Nil ⇒
+	// the endpoint reports empty / "not configurable".
+	getServer func() string
+	setServer func(string) error
 }
 
 // New returns a native API server authenticated by token, using pty for terminals
 // and tabs for the live browser-tab state (fed by the native-messaging host).
 func New(token string, pty *ptyhost.Host, tabs *tabstate.Store) *Server {
 	return &Server{token: token, pty: pty, tabs: tabs}
+}
+
+// SetServerHooks wires the /server endpoint to the live Passbubble upstream: get
+// returns the current URL, set validates + applies + persists a new one.
+func (s *Server) SetServerHooks(get func() string, set func(string) error) {
+	s.getServer, s.setServer = get, set
 }
 
 // Handler builds the routed, auth-protected handler (mount it at /native).
@@ -72,6 +84,8 @@ func (s *Server) Handler() http.Handler {
 	r.Get("/pty/{id}/ws", s.ptyWS)
 	r.Delete("/pty/{id}", s.ptyClose)
 	r.Post("/openin", s.openIn)
+	r.Get("/server", s.serverGet)
+	r.Post("/server", s.serverSet)
 	r.Get("/file", s.fileRead)
 	r.Post("/tabs/ingest", s.tabsIngest)
 	r.Get("/tabs", s.tabsList)
@@ -256,6 +270,38 @@ func (s *Server) openIn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// ─── Passbubble server (device-local) ───────────────────────────────────────
+
+// serverGet reports the current Passbubble upstream URL the /pb proxy forwards to.
+func (s *Server) serverGet(w http.ResponseWriter, _ *http.Request) {
+	url := ""
+	if s.getServer != nil {
+		url = s.getServer()
+	}
+	writeJSON(w, map[string]string{"url": url})
+}
+
+// serverSet points the /pb proxy at a new Passbubble upstream (validated + persisted
+// device-locally by the setter). Takes effect immediately — no restart.
+func (s *Server) serverSet(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		URL string `json:"url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if s.setServer == nil {
+		http.Error(w, "server not configurable", http.StatusNotImplemented)
+		return
+	}
+	if err := s.setServer(req.URL); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, map[string]string{"url": req.URL})
 }
 
 // ─── live browser tabs ───────────────────────────────────────────────────────

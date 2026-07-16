@@ -115,6 +115,24 @@ func (c *Client) OpenIn(ctx context.Context, kind, target string) error {
 	return c.post(ctx, "/native/openin", map[string]string{"type": kind, "target": target}, nil)
 }
 
+// Server returns the Passbubble upstream URL the sidecar's /pb proxy currently
+// forwards to (device-local, account-independent).
+func (c *Client) Server(ctx context.Context) (string, error) {
+	var out struct {
+		URL string `json:"url"`
+	}
+	if err := c.get(ctx, "/native/server", &out); err != nil {
+		return "", err
+	}
+	return out.URL, nil
+}
+
+// SetServer points the sidecar's /pb proxy at a new Passbubble upstream (validated +
+// persisted device-locally). Takes effect immediately.
+func (c *Client) SetServer(ctx context.Context, serverURL string) error {
+	return c.post(ctx, "/native/server", map[string]string{"url": serverURL}, nil)
+}
+
 // LiveGroups returns the tab groups coupled to one project, as reported live by the
 // browser extension(s) through the native-messaging host. Empty when nothing is
 // coupled or no browser is reporting.
