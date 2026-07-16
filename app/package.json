@@ -11,7 +11,8 @@
     "build:all": "npm run build && npm run build:shell",
     "dev": "npm run build:all && electron .",
     "start": "electron .",
-    "e2e": "node scripts/drive.mjs"
+    "e2e": "node scripts/drive.mjs",
+    "e2e:remember": "node scripts/remember.mjs"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.10.0",

@@ -6,10 +6,11 @@
 // port + token are injected into the renderer via the preload bridge (window.phNative)
 // so the WASM UI can call the token-guarded /native API for local-machine actions.
 
-import { app, BrowserWindow, session, WebContents } from "electron";
+import { app, BrowserWindow, session, WebContents, ipcMain, safeStorage } from "electron";
 import { spawn, ChildProcess } from "node:child_process";
 import * as readline from "node:readline";
 import * as path from "node:path";
+import * as fs from "node:fs";
 
 interface Handshake {
   port: number;
@@ -128,6 +129,69 @@ function loadRenderer(hs: Handshake): void {
   win.loadURL(base);
 }
 
+// ─── secure key/value store (origin-independent "stay signed in") ────────────
+// The sidecar binds a random loopback port each launch, so the renderer origin — and
+// thus its localStorage — changes on every start. The remembered login creds instead
+// live here: a small JSON file in userData whose values are encrypted with the OS
+// keychain via safeStorage (falling back to a plain-but-still-persistent encoding when
+// no keychain backend is available). This both survives restarts AND keeps the master
+// password off disk in plaintext, unlike the previous localStorage approach.
+
+function secureStorePath(): string {
+  return path.join(app.getPath("userData"), "secure-store.json");
+}
+function readSecureStore(): Record<string, string> {
+  try {
+    return JSON.parse(fs.readFileSync(secureStorePath(), "utf8")) as Record<string, string>;
+  } catch {
+    return {};
+  }
+}
+function writeSecureStore(store: Record<string, string>): void {
+  try {
+    fs.writeFileSync(secureStorePath(), JSON.stringify(store), { mode: 0o600 });
+  } catch (e) {
+    console.error("secure-store write failed:", e);
+  }
+}
+function encodeSecure(val: string): string {
+  if (safeStorage.isEncryptionAvailable()) {
+    return "enc:" + safeStorage.encryptString(val).toString("base64");
+  }
+  return "raw:" + Buffer.from(val, "utf8").toString("base64");
+}
+function decodeSecure(stored: string): string {
+  try {
+    if (stored.startsWith("enc:")) return safeStorage.decryptString(Buffer.from(stored.slice(4), "base64"));
+    if (stored.startsWith("raw:")) return Buffer.from(stored.slice(4), "base64").toString("utf8");
+  } catch {
+    /* corrupt / keychain changed → treat as absent */
+  }
+  return "";
+}
+function registerSecureStore(): void {
+  ipcMain.on("ph-secure", (e, req: { op: string; key: string; val?: string }) => {
+    const store = readSecureStore();
+    switch (req.op) {
+      case "get":
+        e.returnValue = req.key in store ? decodeSecure(store[req.key]) : "";
+        return;
+      case "set":
+        store[req.key] = encodeSecure(req.val ?? "");
+        writeSecureStore(store);
+        e.returnValue = true;
+        return;
+      case "del":
+        delete store[req.key];
+        writeSecureStore(store);
+        e.returnValue = true;
+        return;
+      default:
+        e.returnValue = null;
+    }
+  });
+}
+
 /** Lock down every browser-tile guest: popups become in-tile tabs (handled in the
  *  guest preload), so deny native window opens, and deny permission prompts (MVP). */
 function hardenWebviewGuests(): void {
@@ -145,6 +209,7 @@ function hardenWebviewGuests(): void {
 }
 
 app.whenReady().then(async () => {
+  registerSecureStore();
   hardenWebviewGuests();
   try {
     const hs = await startSidecar();

@@ -242,7 +242,18 @@ func (r *Root) doLogin(ctx app.Context) {
 
 // ─── local (device) login persistence ────────────────────────────────────────
 
+// The "stay signed in" creds prefer window.phSecure — the Electron desktop's
+// origin-independent, keychain-encrypted store (localStorage would be wiped every
+// launch because the sidecar's loopback port is random). In the plain web build
+// phSecure is absent, so fall back to localStorage.
+
 func lsGet(key string) string {
+	if s := app.Window().Get("phSecure"); s.Truthy() {
+		if v := s.Call("get", key); v.Truthy() {
+			return v.String()
+		}
+		return ""
+	}
 	ls := app.Window().Get("localStorage")
 	if !ls.Truthy() {
 		return ""
@@ -254,12 +265,20 @@ func lsGet(key string) string {
 }
 
 func lsSet(key, val string) {
+	if s := app.Window().Get("phSecure"); s.Truthy() {
+		s.Call("set", key, val)
+		return
+	}
 	if ls := app.Window().Get("localStorage"); ls.Truthy() {
 		ls.Call("setItem", key, val)
 	}
 }
 
 func lsDel(key string) {
+	if s := app.Window().Get("phSecure"); s.Truthy() {
+		s.Call("del", key)
+		return
+	}
 	if ls := app.Window().Get("localStorage"); ls.Truthy() {
 		ls.Call("removeItem", key)
 	}

@@ -5,7 +5,7 @@
 // window.phNative. The token authenticates calls to the /native API and — via a
 // WebSocket subprotocol — the PTY stream. Nothing else from Node is exposed.
 
-import { contextBridge } from "electron";
+import { contextBridge, ipcRenderer } from "electron";
 
 function argValue(prefix: string): string {
   const hit = process.argv.find((a) => a.startsWith(prefix));
@@ -22,4 +22,19 @@ contextBridge.exposeInMainWorld("phNative", {
   // The WebSocket handshake can't set an Authorization header, so the token rides
   // in the Sec-WebSocket-Protocol header; the sidecar's auth accepts this form.
   wsBearer: `ph-bearer.${token}`,
+});
+
+// phSecure is an origin-independent, OS-keychain-encrypted key/value store (Electron
+// safeStorage, kept in userData by the main process). The "stay signed in" creds live
+// here instead of localStorage, because the sidecar binds a RANDOM port each launch —
+// so the loopback origin changes every start and localStorage would never persist.
+// Synchronous (sendSync) so the WASM login flow can read it without async plumbing.
+contextBridge.exposeInMainWorld("phSecure", {
+  get: (key: string): string => ipcRenderer.sendSync("ph-secure", { op: "get", key }) || "",
+  set: (key: string, val: string): void => {
+    ipcRenderer.sendSync("ph-secure", { op: "set", key, val });
+  },
+  del: (key: string): void => {
+    ipcRenderer.sendSync("ph-secure", { op: "del", key });
+  },
 });
