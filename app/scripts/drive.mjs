@@ -98,6 +98,99 @@ async function main() {
   });
   log("terminal text:", JSON.stringify(termText));
 
+  // ── browser tile ───────────────────────────────────────────────────────────
+  // Add a Browser tile via the "+ Tile" menu and exercise the new chrome. Earlier
+  // runs may have persisted browser tiles into this project's layout, so always work
+  // with the LAST .ph-browser (the one we just added) for deterministic assertions.
+  await page.click(".ph-ws-toolbar .ph-add .ph-btn"); // "+ Tile"
+  await page.waitForSelector(".ph-menu", { timeout: 5000 });
+  await page.click('.ph-menu-item:has-text("Browser")');
+  await page.waitForSelector(".ph-browser .ph-browser-toolbar", { timeout: 10000 });
+  await page.waitForTimeout(1200); // let the seed tab reach dom-ready
+  const browser = page.locator(".ph-browser").last();
+  const readBrowser = () =>
+    browser.evaluate((b) => ({
+      hasToolbar: !!b.querySelector(".ph-browser-toolbar"),
+      hasUrl: !!b.querySelector(".ph-browser-url"),
+      hasStatus: !!b.querySelector(".ph-browser-status"),
+      hasView: !!b.querySelector(".ph-browser-view webview"),
+      tabsSingle: b.querySelector(".ph-browser-tabs")?.classList.contains("single"),
+      tabCount: b.querySelectorAll(".ph-browser-tab").length,
+    }));
+  const browserChrome = await readBrowser();
+  log("browser chrome:", JSON.stringify(browserChrome));
+
+  // Toolbar "+" opens a new tab; the tab strip becomes visible (loses .single).
+  await browser.locator('.ph-browser-toolbar .ph-browser-btn[title="Neuer Tab"]').click();
+  await page.waitForTimeout(600);
+  const afterNewTab = await readBrowser();
+  log("after +tab:", JSON.stringify(afterNewTab));
+
+  // DevTools toggle flips the data-devtools attribute.
+  await browser.locator('.ph-browser-btn[title="DevTools"]').click();
+  await page.waitForTimeout(700);
+  const devAttr = await browser.evaluate((b) => b.dataset.devtools || "(unset)");
+  log("devtools attr:", devAttr);
+
+  // ── close-correctness + island survival ────────────────────────────────────
+  // Add a Notizen tile next to the Browser, then close Notizen. Regression checks:
+  //  (1) exactly the Notizen tile vanishes (not a neighbor — the reported bug),
+  //  (2) the Browser tile stays under the SAME data-pane, and
+  //  (3) its live <webview> survives the split collapse (park-and-rehome, not torn out).
+  const bPane = await browser.evaluate((b) => b.closest(".ph-tile")?.getAttribute("data-pane"));
+  await page.click(".ph-ws-toolbar .ph-add .ph-btn");
+  await page.waitForSelector(".ph-menu", { timeout: 5000 });
+  await page.click('.ph-menu-item:has-text("Notizen")');
+  await page.waitForTimeout(800);
+  const readTiles = () =>
+    page.$$eval(".ph-tile", (els) =>
+      els.map((e) => ({ pane: e.getAttribute("data-pane"), label: e.querySelector(".ph-tile-title")?.textContent })),
+    );
+  const tilesBefore = await readTiles();
+  const notes = tilesBefore.find((t) => t.label === "Notizen");
+  log("tiles before close:", JSON.stringify(tilesBefore.map((t) => t.label)));
+  await page.click(`.ph-tile[data-pane="${notes.pane}"] .ph-tile-btn[title="schließen"]`);
+  await page.waitForTimeout(1000);
+  const tilesAfter = await readTiles();
+  log("tiles after close:", JSON.stringify(tilesAfter.map((t) => t.label)));
+  const closedCorrectTile = !tilesAfter.some((t) => t.pane === notes.pane) && tilesAfter.length === tilesBefore.length - 1;
+  const survivorsIntact = tilesBefore
+    .filter((t) => t.pane !== notes.pane)
+    .every((t) => tilesAfter.some((a) => a.pane === t.pane));
+  const browserSurvived = await page.evaluate(
+    (pane) => !!document.querySelector(`.ph-tile[data-pane="${pane}"] .ph-browser-view webview`),
+    bPane,
+  );
+  const closeCorrectnessOK = closedCorrectTile && survivorsIntact && browserSurvived;
+  log("close-correctness:", JSON.stringify({ closedCorrectTile, survivorsIntact, browserSurvived }));
+  const browserOK =
+    browserChrome.hasToolbar &&
+    browserChrome.hasUrl &&
+    browserChrome.hasStatus &&
+    browserChrome.hasView &&
+    browserChrome.tabsSingle === true &&
+    afterNewTab.tabCount === 2 &&
+    afterNewTab.tabsSingle === false;
+  await page.screenshot({ path: shot("browser") });
+
+  // Clean up: close every non-terminal tile (incl. any left by earlier runs) so the
+  // persisted project layout stays idempotent across e2e runs. Terminals (.xterm) are
+  // kept; browser/markdown/notes tiles are closed.
+  const junkTiles = () => page.locator(".ph-tile:not(:has(.xterm))");
+  const before = await junkTiles().count();
+  log("non-terminal tiles before cleanup:", before);
+  for (let i = 0; i < 24 && (await junkTiles().count()) > 0; i++) {
+    await junkTiles()
+      .first()
+      .locator('.ph-tile-btn[title="schließen"]')
+      .click({ force: true, timeout: 3000 })
+      .catch(() => {});
+    await page.waitForTimeout(500);
+  }
+  await page.waitForTimeout(700); // let the debounced closeTile persist flush before quit
+  const remainingJunk = await junkTiles().count();
+  log("non-terminal tiles after cleanup:", remainingJunk);
+
   // ── drop-hint element present? ─────────────────────────────────────────────
   const hasHint = await page.evaluate(() => !!document.querySelector(".ph-drop-hint"));
   log("drop-hint element exists:", hasHint);
@@ -110,8 +203,10 @@ async function main() {
   console.log("\n=== RESULT ===");
   console.log("  swatchClickChangedAccent:", changed, `(start ${accentBefore}, end ${accentAfter})`);
   console.log("  terminalHasContent:", termText !== "(no xterm-rows)" && termText.length > 0);
+  console.log("  browserChromeOK:", browserOK, `(devtools=${devAttr})`);
+  console.log("  closeCorrectnessOK:", closeCorrectnessOK);
   console.log("  dropHintPresent:", hasHint);
-  console.log("  screenshots: /tmp/ph-projects.png /tmp/ph-workspace.png /tmp/ph-final.png");
+  console.log("  screenshots: /tmp/ph-projects.png /tmp/ph-workspace.png /tmp/ph-browser.png /tmp/ph-final.png");
 
   await app.close();
 }

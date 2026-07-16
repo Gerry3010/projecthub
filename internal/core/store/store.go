@@ -358,6 +358,26 @@ func (s *Store) SetBackground(ctx context.Context, bg *domain.Background) error 
 	return s.saveIndex(ctx, idx)
 }
 
+// SearchEngine returns the account-level default browser search engine key
+// (empty ⇒ client default).
+func (s *Store) SearchEngine(ctx context.Context) (string, error) {
+	idx, err := s.loadIndex(ctx)
+	if err != nil {
+		return "", err
+	}
+	return idx.SearchEngine, nil
+}
+
+// SetSearchEngine persists the account-level default search engine in the RootIndex.
+func (s *Store) SetSearchEngine(ctx context.Context, key string) error {
+	idx, err := s.loadIndex(ctx)
+	if err != nil {
+		return err
+	}
+	idx.SearchEngine = key
+	return s.saveIndex(ctx, idx)
+}
+
 // SetProjectBackground updates a project's per-project background override in both
 // the ph-manifest and its RootIndex mirror (nil ⇒ inherit the account default).
 func (s *Store) SetProjectBackground(ctx context.Context, projectID string, bg *domain.Background) error {

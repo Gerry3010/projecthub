@@ -109,6 +109,10 @@ type RootIndex struct {
 	// Background is the account-level default wallpaper/glass settings; a project
 	// without its own Background inherits this. Nil means the flat --bg color.
 	Background *Background `json:"background,omitempty"`
+	// SearchEngine is the account-level default search engine for browser tiles
+	// (a key like "brave"/"ddg"/"google"/"startpage"). Empty means the client
+	// default. Stored here so the choice syncs across devices via Passbubble.
+	SearchEngine string `json:"search_engine,omitempty"`
 }
 
 // Background describes the app/project wallpaper and the glassmorphism of panels.

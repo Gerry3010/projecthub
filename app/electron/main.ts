@@ -6,7 +6,7 @@
 // port + token are injected into the renderer via the preload bridge (window.phNative)
 // so the WASM UI can call the token-guarded /native API for local-machine actions.
 
-import { app, BrowserWindow } from "electron";
+import { app, BrowserWindow, session, WebContents } from "electron";
 import { spawn, ChildProcess } from "node:child_process";
 import * as readline from "node:readline";
 import * as path from "node:path";
@@ -117,11 +117,35 @@ function loadRenderer(hs: Handshake): void {
     // Surface renderer console + errors to the main-process stdout for debugging.
     win.webContents.on("console-message", (_e, _lvl, message) => console.log("[renderer]", message));
     win.webContents.on("render-process-gone", (_e, d) => console.error("[renderer gone]", d.reason));
+    // Browser-tile <webview> guests: inject the guest preload and force a hardened
+    // sandbox. Runs for every <webview> the renderer attaches.
+    win.webContents.on("will-attach-webview", (_e, webPreferences) => {
+      webPreferences.preload = path.join(__dirname, "webview-preload.js");
+      webPreferences.nodeIntegration = false;
+      webPreferences.contextIsolation = true;
+    });
   }
   win.loadURL(base);
 }
 
+/** Lock down every browser-tile guest: popups become in-tile tabs (handled in the
+ *  guest preload), so deny native window opens, and deny permission prompts (MVP). */
+function hardenWebviewGuests(): void {
+  app.on("web-contents-created", (_e, contents: WebContents) => {
+    if (contents.getType() !== "webview") return;
+    // Popups are routed to the host as new tabs by the guest preload; anything that
+    // still reaches here (e.g. a script-driven open) is denied rather than spawning
+    // a native window.
+    contents.setWindowOpenHandler(() => ({ action: "deny" }));
+  });
+  // Geolocation / media / notifications off for the shared browser partition (MVP).
+  session
+    .fromPartition("persist:ph-browser")
+    .setPermissionRequestHandler((_wc, _perm, cb) => cb(false));
+}
+
 app.whenReady().then(async () => {
+  hardenWebviewGuests();
   try {
     const hs = await startSidecar();
     loadRenderer(hs);

@@ -61,6 +61,30 @@ function attachIsland(paneID: string, type: string, paramsJSON: string, slotId: 
   if (island.type === "terminal") queueMicrotask(() => (island!.el as any)._fit?.());
 }
 
+// Hidden off-tree holding pen for live islands during a structural re-render. Keeping
+// islands here (still attached to document, just display:none) means go-app never sees
+// them as children of a dismounting subtree, so <webview>/terminal guests survive.
+function islandPen(): HTMLElement {
+  let pen = document.getElementById("ph-island-pen");
+  if (!pen) {
+    pen = document.createElement("div");
+    pen.id = "ph-island-pen";
+    pen.style.display = "none";
+    document.body.appendChild(pen);
+  }
+  return pen;
+}
+
+/** Move every live island into the holding pen ahead of a layout mutation. Each
+ *  island is re-homed into its new slot by attachIsland when the slot (re)mounts.
+ *  appendChild is an atomic move (not remove+add), so guests are never destroyed. */
+function parkIslands(): void {
+  const pen = islandPen();
+  registry.forEach((island) => {
+    if (island.el.parentElement !== pen) pen.appendChild(island.el);
+  });
+}
+
 function destroyIsland(paneID: string): void {
   const island = registry.get(paneID);
   if (!island) return;
@@ -83,7 +107,7 @@ function createIsland(paneID: string, type: string, params: Record<string, strin
     case "markdown":
       return mountMarkdown(el, params);
     case "browser":
-      return mountBrowser(el, params);
+      return mountBrowser(el, params, paneID);
     default:
       el.textContent = `Unbekannter Tile-Typ: ${type}`;
       return { el, type, cleanup: () => {} };
@@ -234,28 +258,640 @@ function mountMarkdown(el: HTMLElement, params: Record<string, string>): Island 
   return { el, type: "markdown", cleanup: () => timer !== undefined && clearInterval(timer) };
 }
 
-// ─── browser (Electron webview) ────────────────────────────────────────────────
+// ─── browser (Electron webview) — in-tile tab manager ─────────────────────────
 
-function mountBrowser(el: HTMLElement, params: Record<string, string>): Island {
-  el.classList.add("ph-browser");
-  const view = document.createElement("webview") as any;
-  view.setAttribute("partition", "persist:ph-browser");
-  view.setAttribute("allowpopups", "");
-  view.style.width = "100%";
-  view.style.height = "100%";
-  el.appendChild(view);
-  // <webview> only navigates reliably once it is attached to the DOM.
-  const onAttached = () => view.setAttribute("src", normalizeURL(params.url) || "about:blank");
-  return { el, type: "browser", attached: false, onAttached, cleanup: () => view.remove() };
+// One in-tile browser tab. Its <webview> is created lazily the first time the tab
+// is activated (inactive tabs cost nothing) and hidden via display:none otherwise.
+interface BTab {
+  url: string;
+  title: string;
+  favicon: string;
+  view: any | null;
+  loading: boolean;
+  domReady: boolean;
+  canBack: boolean;
+  canForward: boolean;
 }
 
-/** navigate points a browser tile's <webview> at a new url (called from the tile's
- *  address bar). Prepends https:// when the user omits a scheme. */
-function navigate(paneID: string, url: string): void {
-  const island = registry.get(paneID);
-  if (!island || island.type !== "browser") return;
-  const view = island.el.querySelector("webview") as any;
-  if (view) view.setAttribute("src", normalizeURL(url) || "about:blank");
+// User-selectable search engines. Each drives the new-tab "home" page and the
+// address-bar omnibox; the pick persists in localStorage (per machine) and every
+// open browser tile's picker stays in sync via the 'ph-engine-changed' event.
+interface SearchEngine {
+  label: string;
+  home: string;
+  query: string;
+}
+const ENGINES: Record<string, SearchEngine> = {
+  brave: { label: "Brave", home: "https://search.brave.com/", query: "https://search.brave.com/search?q=" },
+  ddg: { label: "DuckDuckGo", home: "https://duckduckgo.com/", query: "https://duckduckgo.com/?q=" },
+  google: { label: "Google", home: "https://www.google.com/", query: "https://www.google.com/search?q=" },
+  startpage: { label: "Startpage", home: "https://www.startpage.com/", query: "https://www.startpage.com/sp/search?query=" },
+};
+const DEFAULT_ENGINE = "brave";
+const ENGINE_KEY = "ph-search-engine";
+const ENGINE_EVENT = "ph-engine-changed";
+
+// Account-level engine pushed from go-app (Passbubble-backed, syncs across devices).
+// Authoritative once loaded; localStorage is a per-machine cache/offline fallback.
+let accountEngine: string | null = null;
+
+function currentEngineKey(): string {
+  let k = accountEngine || DEFAULT_ENGINE;
+  if (!accountEngine) {
+    try {
+      k = localStorage.getItem(ENGINE_KEY) || DEFAULT_ENGINE;
+    } catch {
+      /* localStorage unavailable */
+    }
+  }
+  return ENGINES[k] ? k : DEFAULT_ENGINE;
+}
+function engine(): SearchEngine {
+  return ENGINES[currentEngineKey()];
+}
+// setEngine is the user picking an engine: cache locally, sync open pickers, and
+// persist account-wide via go-app (→ Passbubble).
+function setEngine(key: string): void {
+  if (!ENGINES[key]) return;
+  accountEngine = key;
+  try {
+    localStorage.setItem(ENGINE_KEY, key);
+  } catch {
+    /* ignore */
+  }
+  window.dispatchEvent(new CustomEvent(ENGINE_EVENT, { detail: key }));
+  (window as any).phSetSearchEngine?.(key);
+}
+// applySearchEngine is called BY go-app after loading the account setting: adopt it
+// and sync every open picker, without persisting back (avoids a feedback loop).
+function applySearchEngine(key: string): void {
+  if (!ENGINES[key]) return;
+  accountEngine = key;
+  try {
+    localStorage.setItem(ENGINE_KEY, key);
+  } catch {
+    /* ignore */
+  }
+  window.dispatchEvent(new CustomEvent(ENGINE_EVENT, { detail: key }));
+}
+
+// isLikelyURL decides whether an omnibox entry is a navigable address (vs. a search
+// query): a scheme, localhost/IP[:port], or a whitespace-free host with a dotted TLD.
+function isLikelyURL(s: string): boolean {
+  if (/\s/.test(s)) return false; // has whitespace → search
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(s)) return true; // scheme://…
+  if (/^(localhost|[\d.]+)(:\d+)?(\/|$)/i.test(s)) return true; // localhost / IP
+  return /^[^/\s]+\.[^/\s]{2,}([/:?#]|$)/.test(s); // host.tld[/…]
+}
+
+// omniboxURL turns whatever the user typed into a URL: pass through explicit schemes,
+// treat address-looking input as a URL (https:// prepended), else run it as a search
+// on the currently selected engine.
+function omniboxURL(input: string): string {
+  const s = (input || "").trim();
+  if (!s) return engine().home;
+  if (/^(about|data|file|chrome|view-source|blob):/i.test(s)) return s;
+  if (isLikelyURL(s)) return normalizeURL(s);
+  return engine().query + encodeURIComponent(s);
+}
+
+// mountBrowser builds the whole browser chrome (tab strip + toolbar + view stack +
+// statusbar + find/error overlays) around a set of lazy <webview> tabs. All reactive
+// state (loading, back/forward, title, favicon, hover-URL, zoom) flows JS-only via
+// webview DOM events; only tab-list changes are pushed back to go-app (debounced,
+// window.phBrowserState) for layout restore + the tile label.
+function mountBrowser(el: HTMLElement, params: Record<string, string>, paneID: string): Island {
+  el.classList.add("ph-browser");
+
+  const div = (cls: string) => {
+    const d = document.createElement("div");
+    d.className = cls;
+    return d;
+  };
+  const button = (label: string, title: string) => {
+    const b = document.createElement("button");
+    b.className = "ph-browser-btn";
+    b.type = "button";
+    b.textContent = label;
+    b.title = title;
+    return b;
+  };
+
+  // ── scaffold ──
+  const tabsBar = div("ph-browser-tabs");
+  const toolbar = div("ph-browser-toolbar");
+  const findBar = div("ph-browser-find");
+  const viewWrap = div("ph-browser-view");
+  const status = div("ph-browser-status");
+  const errorOverlay = div("ph-browser-error");
+  errorOverlay.style.display = "none";
+  findBar.style.display = "none";
+  viewWrap.appendChild(errorOverlay); // overlays the webview (viewWrap is positioned)
+  el.append(tabsBar, toolbar, findBar, viewWrap, status);
+
+  // ── toolbar controls ──
+  const btnBack = button("◀", "Zurück");
+  const btnFwd = button("▶", "Vor");
+  const btnReload = button("⟳", "Neu laden");
+  const address = document.createElement("input");
+  address.className = "ph-browser-url";
+  address.type = "text";
+  address.placeholder = "https://…";
+  const btnGo = button("→", "Laden");
+  const btnOpenIn = button("↗", "Im System-Browser öffnen");
+  const btnCopy = button("⧉", "URL kopieren");
+  const btnDev = button("⚙", "DevTools");
+  // New-tab lives in the toolbar so it stays reachable even when the tab strip is
+  // hidden (single-tab "light" mode); the strip has its own "+" for the multi-tab case.
+  const btnNew = button("＋", "Neuer Tab");
+  // Search-engine picker: sets the omnibox + new-tab home; persists across tiles.
+  const engineSel = document.createElement("select");
+  engineSel.className = "ph-browser-engine";
+  engineSel.title = "Suchmaschine";
+  for (const [key, e] of Object.entries(ENGINES)) {
+    const opt = document.createElement("option");
+    opt.value = key;
+    opt.textContent = e.label;
+    engineSel.appendChild(opt);
+  }
+  engineSel.value = currentEngineKey();
+  engineSel.onchange = () => setEngine(engineSel.value);
+  const onEngineChanged = (e: Event) => {
+    engineSel.value = (e as CustomEvent).detail || currentEngineKey();
+  };
+  window.addEventListener(ENGINE_EVENT, onEngineChanged);
+  toolbar.append(btnBack, btnFwd, btnReload, address, btnGo, btnNew, btnOpenIn, btnCopy, btnDev, engineSel);
+
+  // ── find bar ──
+  const findInput = document.createElement("input");
+  findInput.className = "ph-browser-find-input";
+  findInput.placeholder = "Auf Seite suchen…";
+  const findCount = document.createElement("span");
+  findCount.className = "ph-browser-find-count";
+  const findClose = button("✕", "Suche schließen");
+  findBar.append(findInput, findCount, findClose);
+
+  const tabs: BTab[] = [];
+  let active = 0;
+  let devOpen = false;
+  let saveTimer: number | undefined;
+
+  const activeTab = (): BTab | undefined => tabs[active];
+
+  // Debounced push of the tab list back to go-app for persistence + tile label.
+  const pushState = () => {
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = window.setTimeout(() => {
+      const payload = tabs.map((t) => ({ url: t.url, title: t.title }));
+      (window as any).phBrowserState?.(paneID, JSON.stringify(payload), String(active));
+    }, 400);
+  };
+
+  // ── toolbar / chrome refresh (active tab only) ──
+  const updateChrome = () => {
+    const t = activeTab();
+    if (!t) return;
+    if (document.activeElement !== address) address.value = t.url === "about:blank" ? "" : t.url;
+    btnBack.disabled = !t.canBack;
+    btnFwd.disabled = !t.canForward;
+    btnReload.textContent = t.loading ? "✕" : "⟳";
+    btnReload.title = t.loading ? "Stopp" : "Neu laden";
+    if (!status.dataset.hover) status.textContent = t.loading ? "Lädt…" : "";
+  };
+
+  const refreshNav = (t: BTab) => {
+    // canGoBack/canGoForward throw synchronously until the guest's dom-ready fires,
+    // so gate on domReady and wrap the call itself (not just the promise). They are
+    // sync in Electron 33 but Promise-returning in 34+; Promise.resolve absorbs both.
+    if (!t.view || !t.domReady) return;
+    try {
+      Promise.resolve(t.view.canGoBack?.())
+        .then((v: boolean) => {
+          t.canBack = !!v;
+          if (activeTab() === t) btnBack.disabled = !v;
+        })
+        .catch(() => {});
+      Promise.resolve(t.view.canGoForward?.())
+        .then((v: boolean) => {
+          t.canForward = !!v;
+          if (activeTab() === t) btnFwd.disabled = !v;
+        })
+        .catch(() => {});
+    } catch {
+      /* not ready yet */
+    }
+  };
+
+  // ── tab strip render ──
+  const renderTabs = () => {
+    tabsBar.classList.toggle("single", tabs.length <= 1);
+    tabsBar.innerHTML = "";
+    tabs.forEach((t, i) => {
+      const tab = div("ph-browser-tab");
+      if (i === active) tab.classList.add("active");
+      if (t.favicon) {
+        const img = document.createElement("img");
+        img.className = "ph-browser-fav";
+        img.src = t.favicon;
+        img.onerror = () => img.remove();
+        tab.appendChild(img);
+      }
+      const label = document.createElement("span");
+      label.className = "ph-browser-tab-title";
+      label.textContent = t.title || t.url || "Neuer Tab";
+      tab.appendChild(label);
+      const close = button("✕", "Tab schließen");
+      close.className = "ph-browser-tab-close";
+      close.onclick = (e) => {
+        e.stopPropagation();
+        closeTab(i);
+      };
+      tab.appendChild(close);
+      tab.onclick = () => activateTab(i);
+      tabsBar.appendChild(tab);
+    });
+    const plus = button("+", "Neuer Tab");
+    plus.className = "ph-browser-tab-new";
+    plus.onclick = () => {
+      const i = addTab(engine().home);
+      activateTab(i);
+      address.focus();
+    };
+    tabsBar.appendChild(plus);
+  };
+
+  // ── webview lifecycle ──
+  const wireView = (t: BTab, view: any) => {
+    const ifActive = (fn: () => void) => {
+      if (activeTab() === t) fn();
+    };
+    view.addEventListener("did-start-loading", () => {
+      t.loading = true;
+      ifActive(updateChrome);
+    });
+    view.addEventListener("did-stop-loading", () => {
+      t.loading = false;
+      refreshNav(t);
+      ifActive(updateChrome);
+    });
+    const onNav = () => {
+      try {
+        t.url = view.getURL();
+      } catch {
+        /* ignore */
+      }
+      errorOverlay.style.display = "none";
+      refreshNav(t);
+      renderTabs();
+      ifActive(updateChrome);
+      pushState();
+    };
+    view.addEventListener("did-navigate", onNav);
+    view.addEventListener("did-navigate-in-page", onNav);
+    view.addEventListener("page-title-updated", (e: any) => {
+      t.title = e.title || t.url;
+      renderTabs();
+      pushState();
+    });
+    view.addEventListener("page-favicon-updated", (e: any) => {
+      t.favicon = (e.favicons && e.favicons[0]) || "";
+      renderTabs();
+    });
+    view.addEventListener("update-target-url", (e: any) => {
+      ifActive(() => {
+        if (e.url) {
+          status.dataset.hover = "1";
+          status.textContent = e.url;
+        } else {
+          delete status.dataset.hover;
+          status.textContent = t.loading ? "Lädt…" : "";
+        }
+      });
+    });
+    view.addEventListener("did-fail-load", (e: any) => {
+      if (e.errorCode === -3 || e.isMainFrame === false) return; // -3 = user-aborted
+      errorOverlay.textContent = `Kann Seite nicht laden: ${e.validatedURL || t.url} — ${e.errorDescription || e.errorCode}`;
+      errorOverlay.style.display = "";
+    });
+    view.addEventListener("dom-ready", () => {
+      t.domReady = true;
+      refreshNav(t);
+    });
+    view.addEventListener("found-in-page", (e: any) => {
+      const r = e.result;
+      findCount.textContent = r && r.matches ? `${r.activeMatchOrdinal}/${r.matches}` : "0";
+    });
+    view.addEventListener("ipc-message", (e: any) => {
+      if (e.channel === "nav") {
+        if (e.args[0] === "back") goBack();
+        else if (e.args[0] === "forward") goForward();
+      } else if (e.channel === "key") {
+        handleKey(e.args[0]);
+      } else if (e.channel === "open-tab") {
+        const i = addTab(e.args[0]);
+        activateTab(i);
+      } else if (e.channel === "zoom") {
+        if (e.args[0] === "in") adjustZoom(0.5);
+        else if (e.args[0] === "out") adjustZoom(-0.5);
+        else if (e.args[0] === "reset") resetZoom();
+      }
+    });
+  };
+
+  const ensureView = (t: BTab): any => {
+    if (t.view) return t.view;
+    const view = document.createElement("webview") as any;
+    view.setAttribute("partition", "persist:ph-browser");
+    view.setAttribute("allowpopups", "");
+    view.style.display = "none";
+    viewWrap.appendChild(view);
+    t.view = view;
+    wireView(t, view);
+    view.setAttribute("src", normalizeURL(t.url) || "about:blank");
+    return view;
+  };
+
+  const addTab = (url: string): number => {
+    tabs.push({
+      url: url || "about:blank",
+      title: "",
+      favicon: "",
+      view: null,
+      loading: false,
+      domReady: false,
+      canBack: false,
+      canForward: false,
+    });
+    pushState();
+    return tabs.length - 1;
+  };
+
+  const activateTab = (i: number) => {
+    if (i < 0 || i >= tabs.length) return;
+    active = i;
+    tabs.forEach((t, j) => {
+      if (t.view) t.view.style.display = j === i ? "" : "none";
+    });
+    const t = tabs[i];
+    ensureView(t).style.display = "";
+    errorOverlay.style.display = "none";
+    renderTabs();
+    updateChrome();
+    refreshNav(t);
+    pushState();
+  };
+
+  const closeTab = (i: number) => {
+    const t = tabs[i];
+    if (!t) return;
+    if (tabs.length === 1) {
+      // Never leave an empty tile: reset the sole tab to the home page instead of removing it.
+      navigateTo(engine().home);
+      t.title = "";
+      renderTabs();
+      pushState();
+      return;
+    }
+    if (t.view) t.view.remove();
+    tabs.splice(i, 1);
+    if (i < active || active >= tabs.length) active = Math.max(0, active - 1);
+    activateTab(active);
+  };
+
+  // ── navigation actions ──
+  const navigateTo = (raw: string) => {
+    const t = activeTab();
+    if (!t) return;
+    const url = omniboxURL(raw);
+    const view = ensureView(t);
+    errorOverlay.style.display = "none";
+    t.url = url;
+    if (t.domReady) {
+      try {
+        view.loadURL(url);
+      } catch {
+        view.setAttribute("src", url);
+      }
+    } else {
+      view.setAttribute("src", url);
+    }
+  };
+
+  const goBack = () => {
+    const t = activeTab();
+    if (t?.view && t.canBack) {
+      try {
+        t.view.goBack();
+      } catch {
+        /* ignore */
+      }
+    }
+  };
+  const goForward = () => {
+    const t = activeTab();
+    if (t?.view && t.canForward) {
+      try {
+        t.view.goForward();
+      } catch {
+        /* ignore */
+      }
+    }
+  };
+  const reloadOrStop = () => {
+    const t = activeTab();
+    if (!t?.view) return;
+    try {
+      if (t.loading) t.view.stop();
+      else t.view.reload();
+    } catch {
+      /* ignore */
+    }
+  };
+
+  // ── zoom ──
+  const clampZoom = (z: number) => Math.max(-3, Math.min(3, z));
+  const adjustZoom = (delta: number) => {
+    const t = activeTab();
+    if (!t?.view) return;
+    Promise.resolve(t.view.getZoomLevel?.())
+      .then((c: number) => {
+        try {
+          t.view.setZoomLevel(clampZoom((c || 0) + delta));
+        } catch {
+          /* ignore */
+        }
+      })
+      .catch(() => {});
+  };
+  const resetZoom = () => {
+    const t = activeTab();
+    try {
+      t?.view?.setZoomLevel(0);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  // ── find in page ──
+  const openFind = () => {
+    findBar.style.display = "";
+    findInput.focus();
+    findInput.select();
+    if (findInput.value) activeTab()?.view?.findInPage?.(findInput.value);
+  };
+  const closeFind = () => {
+    findBar.style.display = "none";
+    findCount.textContent = "";
+    try {
+      activeTab()?.view?.stopFindInPage("clearSelection");
+    } catch {
+      /* ignore */
+    }
+  };
+  findInput.addEventListener("input", () => {
+    const t = activeTab();
+    if (!t?.view) return;
+    if (findInput.value) {
+      try {
+        t.view.findInPage(findInput.value);
+      } catch {
+        /* ignore */
+      }
+    } else {
+      findCount.textContent = "";
+      try {
+        t.view.stopFindInPage("clearSelection");
+      } catch {
+        /* ignore */
+      }
+    }
+  });
+  findInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      const t = activeTab();
+      if (t?.view && findInput.value) {
+        try {
+          t.view.findInPage(findInput.value, { findNext: true, forward: !e.shiftKey });
+        } catch {
+          /* ignore */
+        }
+      }
+    } else if (e.key === "Escape") {
+      closeFind();
+    }
+  });
+  findClose.onclick = closeFind;
+
+  // Guest-preload keyboard shortcuts routed here via ipc-message 'key'.
+  const handleKey = (action: string) => {
+    switch (action) {
+      case "back":
+        return goBack();
+      case "forward":
+        return goForward();
+      case "focus-address":
+        address.focus();
+        return address.select();
+      case "find":
+        return openFind();
+      case "reload":
+        return reloadOrStop();
+      case "stop":
+        try {
+          activeTab()?.view?.stop();
+        } catch {
+          /* ignore */
+        }
+        return;
+    }
+  };
+
+  // ── wire toolbar ──
+  btnBack.onclick = goBack;
+  btnFwd.onclick = goForward;
+  btnReload.onclick = reloadOrStop;
+  btnGo.onclick = () => navigateTo(address.value);
+  address.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") navigateTo(address.value);
+  });
+  btnOpenIn.onclick = () => {
+    const t = activeTab();
+    const nat = phNative();
+    if (!t || !nat || !t.url || t.url === "about:blank") return;
+    postJSON(nat, "/native/openin", { type: "url", target: t.url }).catch(() => {});
+  };
+  btnCopy.onclick = () => {
+    const t = activeTab();
+    if (!t?.url || t.url === "about:blank") return;
+    navigator.clipboard?.writeText(t.url).catch(() => {});
+    delete status.dataset.hover;
+    status.textContent = "URL kopiert";
+    window.setTimeout(() => {
+      if (status.textContent === "URL kopiert") status.textContent = t.loading ? "Lädt…" : "";
+    }, 1500);
+  };
+  btnNew.onclick = () => {
+    const i = addTab(engine().home);
+    activateTab(i);
+    address.focus();
+  };
+  btnDev.onclick = () => {
+    const t = activeTab();
+    if (!t?.view || !t.domReady) return;
+    try {
+      if (devOpen) t.view.closeDevTools();
+      else t.view.openDevTools();
+    } catch {
+      /* ignore */
+    }
+    devOpen = !devOpen;
+    el.dataset.devtools = devOpen ? "open" : "closed";
+  };
+  // Ctrl+wheel over the chrome zooms; in-guest Ctrl+wheel arrives via ipc 'zoom'.
+  viewWrap.addEventListener(
+    "wheel",
+    (e) => {
+      if (!e.ctrlKey) return;
+      e.preventDefault();
+      adjustZoom(e.deltaY < 0 ? 0.5 : -0.5);
+    },
+    { passive: false },
+  );
+
+  // <webview> navigates reliably only once attached to the DOM, so seed the tabs
+  // (migrating params.tabs JSON, else a single tab from params.url) from onAttached.
+  const onAttached = () => {
+    let seeded: { url?: string; title?: string }[] = [];
+    try {
+      if (params.tabs) seeded = JSON.parse(params.tabs);
+    } catch {
+      /* fall through to single-tab seed */
+    }
+    if (!Array.isArray(seeded) || seeded.length === 0) {
+      // Fresh tile (no persisted tabs): open on the default search engine as home.
+      const initial = params.url && params.url !== "about:blank" ? params.url : engine().home;
+      seeded = [{ url: initial, title: "" }];
+    }
+    seeded.forEach((s) => {
+      const i = addTab(s.url || "about:blank");
+      tabs[i].title = s.title || "";
+    });
+    const want = parseInt(params.active || "0", 10);
+    active = Number.isFinite(want) ? Math.min(Math.max(want, 0), tabs.length - 1) : 0;
+    activateTab(active);
+  };
+
+  return {
+    el,
+    type: "browser",
+    attached: false,
+    onAttached,
+    cleanup: () => {
+      if (saveTimer) clearTimeout(saveTimer);
+      window.removeEventListener(ENGINE_EVENT, onEngineChanged);
+      tabs.forEach((t) => t.view?.remove());
+    },
+  };
 }
 
 function normalizeURL(u: string): string {
@@ -366,7 +1002,9 @@ function safeParse(s: string): Record<string, string> {
 }
 
 // phShell is pure functions — expose immediately (go-app calls it long after load).
-(window as any).phShell = { attachIsland, destroyIsland, navigate };
+// Browser navigation now lives entirely in the tile's own chrome (mountBrowser), so
+// the old top-level navigate() is gone; go-app only attaches/destroys islands.
+(window as any).phShell = { attachIsland, destroyIsland, parkIslands, applySearchEngine };
 
 // The DOM-touching init (drop-hint appends to <body>) must wait: this script runs in
 // <head>, where document.body is still null.

@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -64,12 +65,37 @@ func (w *Workspace) OnMount(ctx app.Context) {
 		}
 		return nil
 	}))
+	// Persist the browser tile's tab state (JS island owns the live chrome; this is
+	// the cold-path callback for layout-restore + tile-label refresh). Args:
+	// paneID, tabsJSON ([{url,title}]), activeIdx. Dispatch onto the render loop so
+	// the mutated params re-render the tile label.
+	app.Window().Set("phBrowserState", app.FuncOf(func(_ app.Value, args []app.Value) any {
+		if len(args) >= 3 {
+			paneID, tabsJSON, activeIdx := args[0].String(), args[1].String(), args[2].String()
+			ctx.Dispatch(func(app.Context) { w.setBrowserState(paneID, tabsJSON, activeIdx) })
+		}
+		return nil
+	}))
+	// Persist the browser tile's account-level default search engine (chosen in the
+	// tile's engine picker) into the Passbubble-backed RootIndex, so it syncs devices.
+	app.Window().Set("phSetSearchEngine", app.FuncOf(func(_ app.Value, args []app.Value) any {
+		if len(args) >= 1 {
+			key := args[0].String()
+			ctx.Async(func() {
+				if err := w.Store.SetSearchEngine(context.Background(), key); err != nil {
+					ctx.Dispatch(func(app.Context) { w.status = err.Error() })
+				}
+			})
+		}
+		return nil
+	}))
 	if w.apprScope == "" {
 		w.apprScope = "project"
 	}
 	ctx.Async(func() {
 		item, err := w.Store.GetLayout(context.Background(), w.Ref.FolderID)
 		accountBg, _ := w.Store.Background(context.Background())
+		searchEngine, _ := w.Store.SearchEngine(context.Background())
 		eff := w.Ref.Background
 		if eff == nil {
 			eff = accountBg
@@ -86,6 +112,13 @@ func (w *Workspace) OnMount(ctx app.Context) {
 			w.bgImageURL = imgURL
 			w.loaded = true
 			applyBackground(eff, imgURL)
+			// Push the account default engine into the shell so all browser tiles
+			// (and their pickers) use it; empty ⇒ shell keeps its own default.
+			if searchEngine != "" {
+				if shell := app.Window().Get("phShell"); shell.Truthy() {
+					shell.Call("applySearchEngine", searchEngine)
+				}
+			}
 		})
 	})
 }
@@ -165,21 +198,47 @@ func (w *Workspace) addMenu() app.UI {
 
 // ─── split-tree rendering ─────────────────────────────────────────────────────
 
+// renderNode wraps every layout node in a nodeView keyed by its PaneID. go-app's
+// HTML reconciler only compares tag names, so without this it would morph a
+// collapsing split's <div class=ph-split> in place into a <div class=ph-tile> and
+// positionally recycle its children — landing the wrong island in the wrong slot
+// ("closing the wrong tile"). Keying by PaneID (DismountEnforcer.CompoID) makes
+// go-app dismount+mount cleanly whenever a position's node identity changes.
 func (w *Workspace) renderNode(n *domain.LayoutNode) app.UI {
+	return &nodeView{w: w, node: n}
+}
+
+// nodeView is the keyed wrapper for one split/leaf position in the layout tree.
+type nodeView struct {
+	app.Compo
+	w    *Workspace
+	node *domain.LayoutNode
+}
+
+// CompoID keys reconciliation by the node's PaneID (empty slot → stable sentinel).
+func (v *nodeView) CompoID() string {
+	if v.node == nil {
+		return "ph-empty"
+	}
+	return v.node.PaneID
+}
+
+func (v *nodeView) Render() app.UI {
+	n := v.node
 	if n == nil {
 		return app.Div().Class("ph-empty").Text("Leerer Workspace — oben ein Tile hinzufügen.")
 	}
 	if n.IsLeaf() {
-		return w.renderTile(n)
+		return v.w.renderTile(n)
 	}
 	ratio := n.Ratio
 	if ratio == 0 {
 		ratio = 0.5
 	}
 	return app.Div().Class("ph-split").Attr("data-dir", n.Dir).Style("--r", fmt.Sprintf("%.4f", ratio)).Body(
-		app.Div().Class("ph-split-a").Body(w.renderNode(n.A)),
+		app.Div().Class("ph-split-a").Body(v.w.renderNode(n.A)),
 		app.Div().Class("ph-divider").Attr("data-node", n.PaneID),
-		app.Div().Class("ph-split-b").Body(w.renderNode(n.B)),
+		app.Div().Class("ph-split-b").Body(v.w.renderNode(n.B)),
 	)
 }
 
@@ -257,8 +316,6 @@ func (w *Workspace) renderTileBody(n *domain.LayoutNode) app.UI {
 func (w *Workspace) islandTile(n *domain.LayoutNode) app.UI {
 	var bar app.UI = app.Div()
 	switch n.Type {
-	case domain.TileBrowser:
-		bar = w.browserBar(n)
 	case domain.TileMarkdown:
 		bar = w.pathBar(n)
 	}
@@ -281,33 +338,38 @@ func (w *Workspace) setParam(paneID, key, val string) *domain.LayoutNode {
 	return leaf
 }
 
-// browserBar is the browser tile's address bar: type a URL, press Enter or click →,
-// and the <webview> navigates (no tile rebuild). Prepends https:// in JS if omitted.
-func (w *Workspace) browserBar(n *domain.LayoutNode) app.UI {
-	paneID := n.PaneID
-	nav := func(url string) {
-		w.setParam(paneID, "url", url)
-		if shell := app.Window().Get("phShell"); shell.Truthy() {
-			shell.Call("navigate", paneID, url)
-		}
-		w.persistSoon()
+// browserTab mirrors one entry of the JS island's tab state (Params["tabs"] JSON).
+type browserTab struct {
+	URL   string `json:"url"`
+	Title string `json:"title"`
+}
+
+// setBrowserState records the browser tile's tab state persisted by the JS island.
+// It keeps Params["tabs"]/["active"] verbatim and derives Params["url"] (active URL,
+// back-compat + used by tileLabel) so the layout store and the tab label stay in sync.
+func (w *Workspace) setBrowserState(paneID, tabsJSON, activeIdx string) {
+	leaf := w.setParam(paneID, "tabs", tabsJSON)
+	if leaf == nil {
+		return
 	}
-	return app.Div().Class("ph-island-bar ph-browser-bar").Body(
-		app.Input().Class("ph-island-input").Type("text").ID("ph-url-"+paneID).
-			Placeholder("https://…").Value(n.Params["url"]).
-			OnKeyDown(func(ctx app.Context, e app.Event) {
-				if e.Get("key").String() == "Enter" {
-					nav(ctx.JSSrc().Get("value").String())
-				}
-			}),
-		app.Button().Class("ph-btn ph-go").Attr("title", "Laden").Text("→").
-			OnClick(func(ctx app.Context, e app.Event) {
-				el := app.Window().Get("document").Call("getElementById", "ph-url-"+paneID)
-				if el.Truthy() {
-					nav(el.Get("value").String())
-				}
-			}),
-	)
+	w.setParam(paneID, "active", activeIdx)
+	if tab := activeBrowserTab(tabsJSON, activeIdx); tab != nil {
+		w.setParam(paneID, "url", tab.URL)
+	}
+	w.persistSoon()
+}
+
+// activeBrowserTab decodes tabsJSON and returns the tab at activeIdx, or nil.
+func activeBrowserTab(tabsJSON, activeIdx string) *browserTab {
+	var tabs []browserTab
+	if json.Unmarshal([]byte(tabsJSON), &tabs) != nil || len(tabs) == 0 {
+		return nil
+	}
+	i, err := strconv.Atoi(activeIdx)
+	if err != nil || i < 0 || i >= len(tabs) {
+		i = 0
+	}
+	return &tabs[i]
 }
 
 // pathBar is the markdown tile's file-path bar: entering a path rebuilds the island
@@ -329,7 +391,20 @@ func (w *Workspace) pathBar(n *domain.LayoutNode) app.UI {
 
 // ─── mutations ────────────────────────────────────────────────────────────────
 
+// parkIslands moves every live island element into a hidden off-tree holding pen
+// before a structural re-render. go-app keys tree nodes by PaneID (see nodeView) and
+// dismounts a collapsing subtree via replaceChild BEFORE OnDismount fires — which
+// would tear a still-embedded <webview>/terminal out of the DOM and destroy its
+// guest. Parking first (an atomic appendChild move, not a remove) preserves the
+// guests; each new slot then re-homes its island via attachIsland on mount.
+func (w *Workspace) parkIslands() {
+	if shell := app.Window().Get("phShell"); shell.Truthy() {
+		shell.Call("parkIslands")
+	}
+}
+
 func (w *Workspace) addTile(t domain.TileType, params map[string]string) {
+	w.parkIslands()
 	leaf := newLeaf(t, params)
 	if w.layout.Root == nil {
 		w.layout.Root = leaf
@@ -345,6 +420,7 @@ func (w *Workspace) splitTile(paneID, dir string) {
 	if parent == nil {
 		return
 	}
+	w.parkIslands()
 	old := *parent
 	*parent = &domain.LayoutNode{
 		Dir: dir, Ratio: 0.5, PaneID: uuid.NewString(),
@@ -356,6 +432,9 @@ func (w *Workspace) splitTile(paneID, dir string) {
 }
 
 func (w *Workspace) closeTile(paneID string) {
+	// Park the survivors (so a collapsing split doesn't destroy their guests), then
+	// destroy only the closed tile's island.
+	w.parkIslands()
 	if shell := app.Window().Get("phShell"); shell.Truthy() {
 		shell.Call("destroyIsland", paneID)
 	}
@@ -397,6 +476,7 @@ func dropEdge(el app.Value, e app.Event) string {
 // (Warp-style), onto the center swaps the two. Islands survive because they follow
 // their paneID through the tree change.
 func (w *Workspace) dropTile(src, target, edge string) {
+	w.parkIslands()
 	if edge == "center" {
 		w.swapTiles(src, target)
 		return
@@ -602,6 +682,9 @@ func tileLabel(n *domain.LayoutNode) string {
 		}
 		return "Terminal"
 	case domain.TileBrowser:
+		if tab := activeBrowserTab(n.Params["tabs"], n.Params["active"]); tab != nil && tab.Title != "" {
+			return tab.Title
+		}
 		return "Browser"
 	case domain.TileMarkdown:
 		return "Markdown"
