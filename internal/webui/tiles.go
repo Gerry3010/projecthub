@@ -18,6 +18,7 @@ package webui
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/maxence-charriere/go-app/v10/pkg/app"
@@ -299,6 +300,33 @@ type sessionsTile struct {
 	sessions []store.Item[domain.CodeSession]
 	loaded   bool
 	status   string
+
+	newID string // manual "add session id" input
+}
+
+func (t *sessionsTile) setNewID(ctx app.Context, e app.Event) {
+	t.newID = ctx.JSSrc().Get("value").String()
+}
+
+// addSession persists a manually entered Claude session id so it shows up in the
+// list (and can be resumed) even if it wasn't auto-discovered.
+func (t *sessionsTile) addSession(ctx app.Context, _ app.Event) {
+	id := strings.TrimSpace(t.newID)
+	if id == "" {
+		return
+	}
+	cs := domain.CodeSession{SessionID: id, Cwd: t.Cwd, LastActive: time.Now()}
+	t.newID, t.status = "", ""
+	ctx.Async(func() {
+		entryID, err := t.Store.CreateCodeSession(context.Background(), t.FolderID, cs)
+		ctx.Dispatch(func(ctx app.Context) {
+			if err != nil {
+				t.status = err.Error()
+				return
+			}
+			t.sessions = append([]store.Item[domain.CodeSession]{{ID: entryID, Val: cs}}, t.sessions...)
+		})
+	})
 }
 
 func (t *sessionsTile) OnMount(ctx app.Context) {
@@ -318,6 +346,12 @@ func (t *sessionsTile) OnMount(ctx app.Context) {
 func (t *sessionsTile) Render() app.UI {
 	return app.Div().Class("ph-tilecontent").Body(
 		app.If(t.status != "", func() app.UI { return app.P().Class("ph-err").Text(t.status) }),
+		app.Div().Class("ph-todoform").Body(
+			app.Input().Class("ph-todoinput").Type("text").Placeholder("Claude Session-ID…").
+				Value(t.newID).OnChange(t.setNewID),
+			app.Button().Class("ph-btn").Text("+ Add").Disabled(strings.TrimSpace(t.newID) == "").
+				OnClick(t.addSession),
+		),
 		app.Ul().Class("ph-list").Body(
 			app.Range(t.sessions).Slice(func(i int) app.UI {
 				s := t.sessions[i]
