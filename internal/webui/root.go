@@ -441,32 +441,36 @@ func focusOnEnter(id string) app.EventHandler {
 
 func (r *Root) projectsView() app.UI {
 	return app.Div().Class("ph-app ph-home").Style("--accent", r.accentColor()).Body(
-		// hero band: brand lockup + live readout on the left, controls on the right
-		app.Header().Class("ph-hero").Body(
-			app.Div().Class("ph-hero-lead").Body(
-				app.Div().Class("ph-hero-mark").Body(nexusIcon(r.accentColor(), 44)),
-				app.Div().Class("ph-hero-text").Body(
-					app.H1().Class("ph-hero-title").Text("ProjectHub"),
-					app.P().Class("ph-hero-readout").Text(r.homeReadout()),
+		// header card: hero band + new-project row wrapped in a glass panel so the
+		// title/readout/input stay readable over a wallpaper (like the project tiles).
+		app.Div().Class("ph-home-head").Body(
+			// hero band: brand lockup + live readout on the left, controls on the right
+			app.Header().Class("ph-hero").Body(
+				app.Div().Class("ph-hero-lead").Body(
+					app.Div().Class("ph-hero-mark").Body(nexusIcon(r.accentColor(), 44)),
+					app.Div().Class("ph-hero-text").Body(
+						app.H1().Class("ph-hero-title").Text("ProjectHub"),
+						app.P().Class("ph-hero-readout").Text(r.homeReadout()),
+					),
+				),
+				app.Div().Class("ph-hero-actions").Body(
+					app.Span().Class("ph-muted ph-hero-user").Text(r.email),
+					app.Button().Class("ph-tile-btn").Title(r.homeToggleTitle()).Text(r.homeToggleIcon()).
+						OnClick(r.toggleHomeView),
+					&accentPicker{Current: r.accentColor(), OnPick: r.pickAccent, OnCustom: r.customAccent},
 				),
 			),
-			app.Div().Class("ph-hero-actions").Body(
-				app.Span().Class("ph-muted ph-hero-user").Text(r.email),
-				app.Button().Class("ph-tile-btn").Title(r.homeToggleTitle()).Text(r.homeToggleIcon()).
-					OnClick(r.toggleHomeView),
-				&accentPicker{Current: r.accentColor(), OnPick: r.pickAccent, OnCustom: r.customAccent},
+			app.Div().Class("ph-newprj").Body(
+				app.Input().Type("text").Placeholder("Neues Projekt…").Value(r.newTitle).OnInput(r.bind(&r.newTitle)).
+					OnKeyDown(func(ctx app.Context, e app.Event) {
+						if e.Get("key").String() == "Enter" {
+							r.createProject(ctx, e)
+						}
+					}),
+				app.Button().Class("ph-btn").Disabled(r.busy).Text("Anlegen").OnClick(r.createProject),
 			),
+			app.If(r.status != "", func() app.UI { return app.P().Class("ph-err").Text(r.status) }),
 		),
-		app.Div().Class("ph-newprj").Body(
-			app.Input().Type("text").Placeholder("Neues Projekt…").Value(r.newTitle).OnInput(r.bind(&r.newTitle)).
-				OnKeyDown(func(ctx app.Context, e app.Event) {
-					if e.Get("key").String() == "Enter" {
-						r.createProject(ctx, e)
-					}
-				}),
-			app.Button().Class("ph-btn").Disabled(r.busy).Text("Anlegen").OnClick(r.createProject),
-		),
-		app.If(r.status != "", func() app.UI { return app.P().Class("ph-err").Text(r.status) }),
 		app.P().Class("ph-eyebrow").Text("Projekte"),
 		app.Ul().Class("ph-list "+r.homeListClass()).Body(
 			app.Range(r.projects).Slice(func(i int) app.UI {
