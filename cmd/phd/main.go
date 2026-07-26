@@ -109,8 +109,15 @@ func main() {
 		// Default/Large drive the WASM-loading logo; without them go-app points the
 		// loader <img> at an external github URL that our CSP blocks (broken image).
 		Icon:    app.Icon{SVG: "/web/icon.svg", Default: "/web/icon.svg", Large: "/web/icon.svg"},
-		Styles:  []string{"/web/app.css", "/web/shell.css"},
+		Styles:  []string{"/web/theme.css", "/web/app.css", "/web/shell.css"},
 		Scripts: []string{"/web/shell.js"}, // island layer (xterm/markdown/webview) + divider resize
+	}
+	// Give the WASM loader a real byte length for its 0→100% progress. The Compress
+	// middleware strips Content-Length from the gzipped app.wasm, so the browser sees
+	// none and the loader shows "NaN%". The on-disk size equals what the browser gets
+	// after transparently decoding gzip, so the progress reads correctly.
+	if fi, err := os.Stat(filepath.Join("web", "app.wasm")); err == nil {
+		webHandler.WasmContentLength = fmt.Sprintf("%d", fi.Size())
 	}
 
 	ptys := ptyhost.New(32)

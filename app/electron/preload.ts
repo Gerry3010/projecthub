@@ -38,3 +38,21 @@ contextBridge.exposeInMainWorld("phSecure", {
     ipcRenderer.sendSync("ph-secure", { op: "del", key });
   },
 });
+
+// phWindow controls the native window. Transparency is opt-in and device-local: it
+// can only be applied when the window is created, so setTransparent persists the flag
+// (secure store) and relaunches the app. getTransparent reads the current flag so the
+// Settings toggle can reflect it. Synchronous (sendSync) like phSecure.
+contextBridge.exposeInMainWorld("phWindow", {
+  getTransparent: (): boolean => ipcRenderer.sendSync("ph-window", { op: "get-transparent" }) === true,
+  setTransparent: (on: boolean): void => {
+    ipcRenderer.sendSync("ph-window", { op: "set-transparent", on });
+  },
+});
+
+// phNotify shows a native OS desktop notification (Electron Notification API in the
+// main process). Used for todo deadline/reminder alerts, so they fire even when the
+// window is backgrounded. Fire-and-forget — no return value needed.
+contextBridge.exposeInMainWorld("phNotify", (title: string, body: string): void => {
+  ipcRenderer.send("ph-notify", { title, body });
+});

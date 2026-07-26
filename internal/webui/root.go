@@ -23,6 +23,7 @@ package webui
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
 	"path"
 	"strconv"
 
@@ -72,6 +73,32 @@ type Root struct {
 
 	// account-level app accent (CSS hex); loaded at unlock, synced via the RootIndex
 	accent string
+	// homeView is the projects-home layout: "grid" (default) or "list". Synced via
+	// the RootIndex.
+	homeView string
+	// theme is the account-level UI theme key ("deck-dark" default, "liquid-glass", …),
+	// synced via the RootIndex; a project may override it (applied by the Workspace).
+	theme string
+	// accountBg is the account-level default wallpaper/glass background, loaded at
+	// unlock and applied on the home view. A project may override it (r.selected.Background).
+	accountBg *domain.Background
+	// bgURL caches the resolved account wallpaper image URL for the home view.
+	bgURL string
+
+	// Global Claude chat sidebar (right dock, app-wide, toggleable). claudeOpener is
+	// registered by the active Workspace so the sidebar's "start Claude" opens a
+	// terminal tile there; nil on the home view (no workspace → starter disabled).
+	chatOpen     bool
+	claudeOpener func(ctx app.Context, cwd, prompt string)
+
+	// showSettings overlays the global settings screen (left rail gear). Account-wide;
+	// works over both the home view and an open workspace. settingsTab is the active
+	// tab ("" ⇒ Themes).
+	showSettings bool
+	settingsTab  string
+	// settingsThemeScope: "account" (default) or "project" — which scope a theme pick
+	// in the Themes tab writes to (project option only offered when one is open).
+	settingsThemeScope string
 }
 
 // accentColor returns the chosen app accent, or the default when none is set yet.
@@ -83,14 +110,76 @@ func (r *Root) accentColor() string {
 }
 
 func (r *Root) Render() app.UI {
-	switch {
-	case !r.unlocked:
+	if !r.unlocked {
 		return r.loginView()
-	case r.selected != nil:
-		return &Workspace{Store: r.store, Ref: *r.selected, Back: r.closeProject, Native: r.native}
-	default:
-		return r.projectsView()
 	}
+	var main app.UI
+	if r.selected != nil {
+		sel := r.selected
+		main = &Workspace{Store: r.store, Ref: *sel, Back: r.closeProject, Native: r.native,
+			RegisterClaudeOpener: func(open func(ctx app.Context, cwd, prompt string)) { r.claudeOpener = open },
+			OnColor: func(color string) {
+				sel.Color = color // update the open project's ref
+				for i := range r.projects {
+					if r.projects[i].ID == sel.ID {
+						r.projects[i].Color = color // keep the rail/home list in sync
+					}
+				}
+			}}
+	} else {
+		r.claudeOpener = nil // no workspace on the home view
+		main = r.projectsView()
+	}
+	return app.Div().Class("ph-approot").Body(
+		// Home wallpaper layer (account default). In a project the Workspace draws its
+		// own wallpaper, so only render this on the home view to avoid a double layer.
+		app.If(r.selected == nil, func() app.UI {
+			return app.Div().Class("ph-app-wallpaper")
+		}),
+		r.railView(),
+		app.Div().Class("ph-approot-main").Body(main),
+		app.If(r.showSettings, r.settingsView),
+		app.If(r.chatOpen, r.chatSidebar),
+		// Floating toggle for the global Claude sidebar (desktop only).
+		app.If(r.native.Available(), func() app.UI {
+			cls := "ph-chat-fab"
+			if r.chatOpen {
+				cls += " ph-chat-fab-on"
+			}
+			return app.Button().Class(cls).Title("Claude-Chat").
+				OnClick(func(ctx app.Context, _ app.Event) { r.chatOpen = !r.chatOpen }).
+				Body(icon("chat", 20))
+		}),
+	)
+}
+
+// activeCwd is the working dir the global Claude sidebar targets: the open project's
+// local path, or empty on the home view.
+func (r *Root) activeCwd() string {
+	if r.selected != nil {
+		return r.selected.LocalPath
+	}
+	return ""
+}
+
+// chatSidebar is the app-wide, right-docked Claude chat (viewer + session browser +
+// starter), reusing the same claudeTile as the Claude tile. Its "start" opens a
+// terminal in the active workspace via the registered opener.
+func (r *Root) chatSidebar() app.UI {
+	return app.Aside().Class("ph-chat-sidebar").Body(
+		app.Div().Class("ph-chat-head").Body(
+			app.Span().Class("ph-chat-title").Text("Claude"),
+			app.Button().Class("ph-tile-btn").Title("Schließen").Text("✕").
+				OnClick(func(ctx app.Context, _ app.Event) { r.chatOpen = false }),
+		),
+		&claudeTile{
+			Native:       r.native,
+			Cwd:          r.activeCwd(),
+			OpenClaude:   r.claudeOpener,
+			Embedded:     true,
+			SystemPrompt: buildManagerSystemPrompt(r.projects),
+		},
+	)
 }
 
 // openProject shows a project's detail page.
@@ -103,6 +192,8 @@ func (r *Root) openProject(ref domain.ProjectRef) func(ctx app.Context, e app.Ev
 // closeProject returns to the project list, refreshing it.
 func (r *Root) closeProject(ctx app.Context) {
 	r.selected = nil
+	setDocTheme(r.theme)                   // back to the account theme (drop any project override)
+	applyBackground(r.accountBg, r.bgURL) // back to the account wallpaper (drop project override)
 	r.busy, r.status = true, ""
 	ctx.Async(func() { r.reload(ctx, nil) })
 }
@@ -239,12 +330,22 @@ func (r *Root) doLogin(ctx app.Context) {
 		if err != nil {
 			accent = domain.DefaultAccent // non-fatal: fall back rather than block unlock
 		}
+		homeView, err := st.HomeView(context.Background())
+		if err != nil || homeView == "" {
+			homeView = "grid"
+		}
+		theme, err := st.Theme(context.Background())
+		if err != nil {
+			theme = "" // non-fatal → built-in default
+		}
+		accountBg, _ := st.Background(context.Background()) // account-default wallpaper (nil ⇒ flat deck)
 
 		// Under the Electron shell, offer recently-active Claude Code dirs that
 		// aren't projects yet. In the hosted browser build phNative is undefined,
 		// so nc is nil and no suggestions appear.
 		base, token := readPhNative()
 		nc := nativeclient.New(base, token)
+		bgURL := resolveBgImageURL(st, nc, accountBg) // resolve the wallpaper image (needs nc for local/vault)
 		var suggestions []nativeclient.ClaudeSuggestion
 		if nc.Available() {
 			if sug, err := nc.Suggestions(context.Background()); err == nil {
@@ -258,8 +359,14 @@ func (r *Root) doLogin(ctx app.Context) {
 			r.store = st
 			r.projects = projects
 			r.accent = accent
+			r.homeView = homeView
+			r.theme = theme
+			r.accountBg = accountBg
+			r.bgURL = bgURL
 			r.native = nc
 			r.suggestions = suggestions
+			setDocTheme(theme)                 // apply the account UI theme immediately
+			applyBackground(accountBg, bgURL) // apply the account wallpaper on the home view
 
 			// Persist per the "stay signed in" choice (local-only, this device).
 			lsSet("ph.email", email)
@@ -333,41 +440,137 @@ func focusOnEnter(id string) app.EventHandler {
 // ─── projects ───────────────────────────────────────────────────────────────
 
 func (r *Root) projectsView() app.UI {
-	return app.Div().Class("ph-app").Style("--accent", r.accentColor()).Body(
-		app.Header().Class("ph-header").Body(
-			app.Div().Class("ph-brand").Body(
-				nexusIcon(r.accentColor(), 26),
-				app.H1().Text("Projekte"),
+	return app.Div().Class("ph-app ph-home").Style("--accent", r.accentColor()).Body(
+		// hero band: brand lockup + live readout on the left, controls on the right
+		app.Header().Class("ph-hero").Body(
+			app.Div().Class("ph-hero-lead").Body(
+				app.Div().Class("ph-hero-mark").Body(nexusIcon(r.accentColor(), 44)),
+				app.Div().Class("ph-hero-text").Body(
+					app.H1().Class("ph-hero-title").Text("ProjectHub"),
+					app.P().Class("ph-hero-readout").Text(r.homeReadout()),
+				),
 			),
-			app.Div().Class("ph-headright").Body(
-				app.Span().Class("ph-muted").Text(r.email),
-				swatchBar(r.accentColor(), r.pickAccent, r.customAccent),
+			app.Div().Class("ph-hero-actions").Body(
+				app.Span().Class("ph-muted ph-hero-user").Text(r.email),
+				app.Button().Class("ph-tile-btn").Title(r.homeToggleTitle()).Text(r.homeToggleIcon()).
+					OnClick(r.toggleHomeView),
+				&accentPicker{Current: r.accentColor(), OnPick: r.pickAccent, OnCustom: r.customAccent},
 			),
 		),
 		app.Div().Class("ph-newprj").Body(
-			app.Input().Type("text").Placeholder("Neues Projekt…").Value(r.newTitle).OnInput(r.bind(&r.newTitle)),
+			app.Input().Type("text").Placeholder("Neues Projekt…").Value(r.newTitle).OnInput(r.bind(&r.newTitle)).
+				OnKeyDown(func(ctx app.Context, e app.Event) {
+					if e.Get("key").String() == "Enter" {
+						r.createProject(ctx, e)
+					}
+				}),
 			app.Button().Class("ph-btn").Disabled(r.busy).Text("Anlegen").OnClick(r.createProject),
 		),
 		app.If(r.status != "", func() app.UI { return app.P().Class("ph-err").Text(r.status) }),
-		app.Ul().Class("ph-list").Body(
+		app.P().Class("ph-eyebrow").Text("Projekte"),
+		app.Ul().Class("ph-list "+r.homeListClass()).Body(
 			app.Range(r.projects).Slice(func(i int) app.UI {
-				p := r.projects[i]
-				return app.Li().Class("ph-item").Body(
-					app.Div().Class("ph-item-main").Body(
-						nexusIcon(p.AccentColor(), 22),
-						app.Button().Class("ph-title ph-titlebtn").Text(p.Title).OnClick(r.openProject(p)),
-					),
-					app.Button().Class("ph-link").Text("löschen").OnClick(func(ctx app.Context, _ app.Event) {
-						r.deleteProject(ctx, p.ID)
-					}),
-				)
+				return &projectItem{r: r, p: r.projects[i]}
 			}),
 			app.If(len(r.projects) == 0, func() app.UI {
-				return app.Li().Class("ph-muted").Text("Noch keine Projekte.")
+				return app.Li().Class("ph-empty-card").Text("Noch keine Projekte — oben eins anlegen oder links über ＋.")
 			}),
 		),
 		r.suggestionsView(),
 	)
+}
+
+// homeReadout is the hero's status line: project count plus, on the desktop shell,
+// how many Claude Code sessions were discovered across the suggestion dirs.
+func (r *Root) homeReadout() string {
+	n := len(r.projects)
+	word := "Projekte"
+	if n == 1 {
+		word = "Projekt"
+	}
+	out := fmt.Sprintf("%d %s", n, word)
+	sessions := 0
+	for _, s := range r.suggestions {
+		sessions += s.SessionCount
+	}
+	if sessions > 0 {
+		out += fmt.Sprintf(" · %d Claude-Sessions gefunden", sessions)
+	}
+	return out
+}
+
+// homeListClass maps the current home view to the projects-list CSS class.
+func (r *Root) homeListClass() string {
+	if r.homeView == "list" {
+		return "ph-home-list"
+	}
+	return "ph-home-grid"
+}
+
+func (r *Root) homeToggleIcon() string {
+	if r.homeView == "list" {
+		return "▦" // offer switching to grid
+	}
+	return "☰" // offer switching to list
+}
+
+func (r *Root) homeToggleTitle() string {
+	if r.homeView == "list" {
+		return "Als Grid anzeigen"
+	}
+	return "Als Liste anzeigen"
+}
+
+// toggleHomeView flips grid⇄list, updates the UI immediately and persists it.
+func (r *Root) toggleHomeView(ctx app.Context, _ app.Event) {
+	if r.homeView == "list" {
+		r.homeView = "grid"
+	} else {
+		r.homeView = "list"
+	}
+	view := r.homeView
+	st := r.store
+	ctx.Async(func() {
+		if err := st.SetHomeView(context.Background(), view); err != nil {
+			ctx.Dispatch(func(ctx app.Context) { r.status = "Ansicht speichern fehlgeschlagen: " + err.Error() })
+		}
+	})
+}
+
+// projectItem is the keyed wrapper for one project row. Keying reconciliation by
+// the project ID (CompoID) makes go-app dismount+mount rows cleanly on reorder or
+// delete, instead of positionally recycling <li>s — which otherwise leaves the
+// per-project color/handlers stuck on the wrong row (same class of bug fixed for
+// layout tiles via nodeView in workspace.go).
+type projectItem struct {
+	app.Compo
+	r *Root
+	p domain.ProjectRef
+}
+
+func (it *projectItem) CompoID() string { return it.p.ID }
+
+func (it *projectItem) Render() app.UI {
+	p, r := it.p, it.r
+	meta := p.LocalPath
+	if meta == "" {
+		meta = "kein lokaler Pfad"
+	}
+	// The whole card opens the project; the delete link stops propagation so it
+	// doesn't also trigger the open.
+	return app.Li().Class("ph-item ph-proj").Style("--accent", p.AccentColor()).
+		OnClick(r.openProject(p)).
+		Body(
+			app.Div().Class("ph-item-main").Body(
+				nexusIcon(p.AccentColor(), 22),
+				app.Span().Class("ph-title").Text(p.Title),
+			),
+			app.Span().Class("ph-proj-meta").Title(meta).Text(meta),
+			app.Button().Class("ph-link ph-proj-del").Text("löschen").OnClick(func(ctx app.Context, e app.Event) {
+				e.Call("stopPropagation")
+				r.deleteProject(ctx, p.ID)
+			}),
+		)
 }
 
 // suggestionsView renders "add this project?" cards for recently-active Claude Code
@@ -377,21 +580,36 @@ func (r *Root) suggestionsView() app.UI {
 		return app.Div()
 	}
 	return app.Div().Class("ph-suggest").Body(
-		app.H2().Class("ph-suggest-h").Text("Aus Claude Code hinzufügen"),
-		app.Ul().Class("ph-list").Body(
+		app.P().Class("ph-eyebrow").Text("Aus Claude Code"),
+		app.Ul().Class("ph-list "+r.homeListClass()).Body(
 			app.Range(r.suggestions).Slice(func(i int) app.UI {
-				s := r.suggestions[i]
-				return app.Li().Class("ph-item ph-suggest-item").Body(
-					app.Div().Class("ph-suggest-info").Body(
-						app.Span().Class("ph-title").Text(suggestionTitle(s)),
-						app.Span().Class("ph-muted ph-suggest-path").Text(s.Cwd),
-						app.Span().Class("ph-muted").Text(sessionCountLabel(s.SessionCount)),
-					),
-					app.Button().Class("ph-btn").Disabled(r.busy).Text("+ Projekt").
-						OnClick(r.addSuggestion(s)),
-				)
+				return &suggestItem{r: r, s: r.suggestions[i]}
 			}),
 		),
+	)
+}
+
+// suggestItem is the keyed wrapper for one Claude-Code suggestion card, keyed by
+// its working dir (Cwd) so filtering/reordering the suggestions list reconciles
+// cleanly — see projectItem for the rationale.
+type suggestItem struct {
+	app.Compo
+	r *Root
+	s nativeclient.ClaudeSuggestion
+}
+
+func (it *suggestItem) CompoID() string { return it.s.Cwd }
+
+func (it *suggestItem) Render() app.UI {
+	s, r := it.s, it.r
+	return app.Li().Class("ph-item ph-suggest-item").Body(
+		app.Div().Class("ph-suggest-info").Body(
+			app.Span().Class("ph-title").Text(suggestionTitle(s)),
+			app.Span().Class("ph-muted ph-suggest-path").Text(s.Cwd),
+			app.Span().Class("ph-muted").Text(sessionCountLabel(s.SessionCount)),
+		),
+		app.Button().Class("ph-btn").Disabled(r.busy).Text("+ Projekt").
+			OnClick(r.addSuggestion(s)),
 	)
 }
 

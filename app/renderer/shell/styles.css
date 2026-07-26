@@ -6,15 +6,20 @@
 .ph-workspace {
   position: fixed;
   inset: 0;
+  left: var(--rail-w, 0); /* clear the left quick-switcher rail */
   display: flex;
   flex-direction: column;
-  background: var(--bg);
+  /* --app-alpha < 1 lets the deck go translucent (window transparency opt-in) so the
+     desktop shows through the gaps between islands; tiles keep their own alpha. */
+  background: color-mix(in srgb, var(--bg) calc(var(--app-alpha, 1) * 100%), transparent);
   color: var(--fg);
 }
-/* wallpaper layer: color or image, with an optional dark dim overlay */
+/* wallpaper layer: color or image, with an optional dark dim overlay. Fades with
+   --app-alpha too, so "window opacity" dims the wallpaper together with the deck. */
 .ph-ws-wallpaper {
   position: absolute; inset: 0; z-index: 0;
   pointer-events: none; /* purely decorative — must never intercept clicks */
+  opacity: var(--app-alpha, 1);
   background-color: var(--bg-color, transparent);
   background-image: var(--bg-image, none);
   background-size: cover; background-position: center; background-repeat: no-repeat;
@@ -45,18 +50,56 @@
 
 /* toolbar chrome */
 .ph-add { position: relative; }
+/* full-viewport transparent catcher that closes an open menu on outside click.
+   z-index sits just below .ph-menu (20) so the menu items stay clickable. */
+.ph-backdrop { position: fixed; inset: 0; z-index: 19; background: transparent; }
 .ph-menu {
-  position: absolute; top: 2.2rem; right: 0; z-index: 20; min-width: 180px;
-  background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+  position: absolute; top: 2.4rem; right: 0; z-index: 20; min-width: 190px;
+  background: color-mix(in srgb, var(--ph-panel-2) 97%, transparent);
+  border: 1px solid var(--ph-line); border-radius: var(--radius-md);
   padding: 0.3rem; display: flex; flex-direction: column;
-  box-shadow: 0 10px 30px rgba(0,0,0,0.4);
+  box-shadow: var(--shadow-pop), inset 0 1px 0 var(--ph-rim);
+  -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
 }
 .ph-menu-item {
-  background: none; border: 0; color: var(--fg); text-align: left;
-  padding: 0.45rem 0.6rem; border-radius: 6px; cursor: pointer; font-size: 0.9rem;
+  background: none; border: 0; color: var(--ph-ink); text-align: left;
+  font-family: inherit; padding: 0.45rem 0.6rem; border-radius: var(--radius-sm);
+  cursor: pointer; font-size: 0.88rem;
 }
-.ph-menu-item:hover { background: var(--border); }
-.ph-empty { display: grid; place-items: center; height: 100%; color: var(--muted); }
+.ph-menu-item:hover { background: var(--ph-panel); color: var(--ph-ink); }
+.ph-empty {
+  display: grid; place-items: center; height: 100%; color: var(--ph-ink-3);
+  font-family: var(--font-mono); font-size: 0.82rem; letter-spacing: 0.02em;
+}
+/* tile ⋯ overflow menu — a workspace-root popover anchored at the cursor, opening
+   down-left so a right-edge tile button keeps it on-screen. */
+.ph-tile-menu {
+  position: fixed; top: auto; right: auto; z-index: 62;
+  transform: translate(-100%, 6px);
+}
+.ph-menu-item { display: flex; align-items: center; gap: 0.55rem; }
+.ph-menu-icon { display: inline-flex; align-items: center; justify-content: center; width: 1.2em; color: var(--ph-ink-2); }
+.ph-menu-item-danger { color: var(--err); }
+.ph-menu-item-danger:hover { background: color-mix(in srgb, var(--err) 16%, transparent); }
+/* file-tree right-click menu: fixed at the cursor. Defined here (shell.css loads
+   last) so it beats the generic .ph-menu absolute rule; the tile no longer traps
+   fixed positioning (glass moved to .ph-tile::before), so it anchors to the viewport. */
+.ph-ctxmenu {
+  position: fixed; top: auto; right: auto; left: auto; bottom: auto;
+  transform: none; z-index: 62; min-width: 190px;
+}
+
+/* code editor tile (CodeMirror island) */
+.ph-editor { display: flex; flex-direction: column; height: 100%; min-height: 0; background: var(--bg); }
+.ph-editor-bar { flex: 0 0 auto; display: flex; align-items: center; gap: 0.35rem; padding: 0.3rem; border-bottom: 1px solid var(--border); }
+.ph-editor-path { flex: 1; min-width: 0; }
+.ph-editor-dirty { flex: 0 0 auto; width: 0.9rem; text-align: center; color: var(--accent, #6d8bff); }
+.ph-editor-btn { flex: 0 0 auto; background: var(--bg); border: 1px solid var(--border); color: var(--fg); border-radius: 6px; padding: 0.3rem 0.55rem; cursor: pointer; font-size: 0.8rem; }
+.ph-editor-btn:hover { border-color: var(--accent, #6d8bff); }
+.ph-editor-theme, .ph-editor-scope { flex: 0 0 auto; background: var(--bg); border: 1px solid var(--border); color: var(--fg); border-radius: 6px; padding: 0.25rem 0.3rem; font-size: 0.78rem; cursor: pointer; }
+.ph-editor-host { flex: 1; min-height: 0; overflow: hidden; }
+.ph-editor-host .cm-editor { height: 100%; }
+.ph-editor-host .cm-scroller { overflow: auto; }
 .ph-tilecontent { height: 100%; overflow: auto; padding: 0.6rem; }
 .ph-island-wrap { display: flex; flex-direction: column; height: 100%; min-height: 0; }
 .ph-island-bar { flex: 0 0 auto; padding: 0.25rem; border-bottom: 1px solid var(--border); }
@@ -130,6 +173,14 @@
 .ph-cc-session:hover { border-color: var(--accent, #6d8bff); }
 .ph-cc-session-active { border-color: var(--accent, #6d8bff); background: var(--border); }
 .ph-cc-detail { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 0.6rem; }
+/* session task list (Claude Code plan, read-only checklist) */
+.ph-cc-tasks { border: 1px solid var(--border); border-radius: 8px; padding: 0.4rem 0.55rem; background: color-mix(in srgb, var(--accent, #6d8bff) 6%, transparent); }
+.ph-cc-tasks-head { display: flex; align-items: center; gap: 0.4rem; font-size: 0.82rem; font-weight: 600; margin-bottom: 0.35rem; }
+.ph-cc-tasklist { gap: 0.25rem; }
+.ph-cc-taskitem { display: flex; align-items: flex-start; gap: 0.45rem; font-size: 0.85rem; line-height: 1.4; padding: 0.1rem 0; border: 0; }
+.ph-cc-task-icon { flex: none; }
+.ph-cc-task-completed .ph-cc-task-text { text-decoration: line-through; color: var(--muted); }
+.ph-cc-task-in_progress .ph-cc-task-text { font-weight: 600; }
 .ph-cc-msg { padding: 0.4rem 0.55rem; border: 1px solid var(--border); border-radius: 8px; }
 .ph-cc-role-user { background: color-mix(in srgb, var(--accent, #6d8bff) 8%, transparent); }
 .ph-cc-msghead { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.3rem; }
@@ -161,6 +212,13 @@
   padding-top: 0.5rem; margin-top: 0.4rem; border-top: 1px solid var(--border);
 }
 .ph-cc-input textarea.ph-island-input { flex: 1; min-height: 2.4rem; resize: vertical; }
+/* embedded sidebar chat: stacked actions row + input + send button (no terminal) */
+.ph-cc-input-embedded { flex-direction: column; align-items: stretch; gap: 0.4rem; }
+.ph-cc-input-actions { display: flex; align-items: center; gap: 0.6rem; min-height: 1.2rem; }
+.ph-cc-input-actions .ph-link { padding: 0; }
+.ph-cc-running { font-size: 0.78rem; color: var(--accent); }
+@keyframes ph-cc-pulse { 0%,100% { opacity: 0.45; } 50% { opacity: 1; } }
+.ph-cc-running { animation: ph-cc-pulse 1.2s ease-in-out infinite; }
 
 /* Pipepush tile: run overview (top strip, newest first) + decrypted run detail. */
 .ph-pp { display: flex; flex-direction: column; height: 100%; min-height: 0; }
@@ -184,14 +242,28 @@
 .ph-appr {
   position: absolute; top: 3rem; right: 0.6rem; z-index: 30;
   width: 300px; max-width: calc(100vw - 1.2rem);
-  background: color-mix(in srgb, var(--card) 96%, transparent);
-  border: 1px solid var(--border); border-radius: 10px;
+  background: color-mix(in srgb, var(--ph-panel-2) 96%, transparent);
+  border: 1px solid var(--ph-line); border-radius: var(--radius-md);
   padding: 0.8rem; display: flex; flex-direction: column; gap: 0.45rem;
-  backdrop-filter: blur(12px); box-shadow: 0 12px 40px rgba(0,0,0,0.45);
+  -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+  box-shadow: var(--shadow-pop), inset 0 1px 0 var(--ph-rim);
 }
 .ph-appr-head { display: flex; align-items: center; gap: 0.4rem; }
 .ph-appr-lbl { font-size: 0.78rem; color: var(--muted); margin: 0.25rem 0 0; }
-.ph-appr-slider input[type="range"] { width: 100%; }
+.ph-appr-slider { max-width: 100%; }
+.ph-appr-slider input[type="range"] {
+  width: 100%; box-sizing: border-box; display: block; margin: 0.3rem 0 0; height: 4px;
+  -webkit-appearance: none; appearance: none; background: var(--ph-line);
+  border-radius: 3px; cursor: pointer;
+}
+.ph-appr-slider input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none; width: 15px; height: 15px; border-radius: 50%;
+  background: var(--accent); border: 2px solid var(--ph-panel-2); cursor: pointer;
+}
+.ph-appr-slider input[type="range"]::-moz-range-thumb {
+  width: 13px; height: 13px; border-radius: 50%; border: 2px solid var(--ph-panel-2);
+  background: var(--accent); cursor: pointer;
+}
 .ph-appr-hint { font-size: 0.74rem; margin: 0.2rem 0 0; }
 .ph-scope-btn {
   flex: 1; background: var(--bg); color: var(--fg);
@@ -203,11 +275,18 @@
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  padding: 0.4rem 0.6rem;
-  border-bottom: 1px solid var(--border);
-  background: color-mix(in srgb, var(--card) 88%, transparent);
+  padding: 0.4rem 0.7rem;
+  border-bottom: 1px solid var(--ph-line);
+  background: color-mix(in srgb, var(--ph-panel) 82%, transparent);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
 }
 .ph-ws-toolbar .ph-spacer { flex: 1; }
+/* project name in the workspace toolbar wears the display face */
+.ph-ws-toolbar .ph-tile-title {
+  font-family: var(--font-display); font-weight: 600; font-size: 0.95rem;
+  letter-spacing: 0.01em; color: var(--ph-ink);
+}
 .ph-ws-body { flex: 1; min-height: 0; position: relative; }
 
 /* ── split tree ──────────────────────────────────────────────────────────── */
@@ -217,48 +296,78 @@
 .ph-split-b { flex: calc(1 - var(--r, 0.5)) 1 0; min-width: 0; min-height: 0; display: flex; }
 .ph-split-a > *, .ph-split-b > * { flex: 1; min-width: 0; min-height: 0; }
 
+/* divider is mostly transparent so the deck shows between islands; it only tints
+   on hover. The tiles' own 6px margins carry the visible separation. */
 .ph-divider {
   flex: 0 0 6px;
-  background: var(--border);
+  background: transparent;
   cursor: col-resize;
   transition: background 0.12s;
 }
 .ph-split[data-dir="col"] > .ph-divider { cursor: row-resize; }
-.ph-divider:hover { background: var(--accent); }
+.ph-divider:hover { background: color-mix(in srgb, var(--accent) 26%, transparent); }
 body.ph-resizing { cursor: grabbing; user-select: none; }
 
 /* ── tile ────────────────────────────────────────────────────────────────── */
 .ph-tile {
+  position: relative;
   display: flex;
   flex-direction: column;
   min-width: 0;
   min-height: 0;
-  margin: 3px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  margin: 6px;
+  border: 1px solid var(--ph-line);
+  border-radius: var(--radius-tile);
   overflow: hidden;
-  background: color-mix(in srgb, var(--card) calc(var(--panel-alpha, 1) * 100%), transparent);
-  backdrop-filter: blur(var(--panel-blur, 0px));
+  background: transparent;
+  box-shadow: var(--shadow-island), inset 0 1px 0 var(--ph-rim);
+  transition: box-shadow .14s ease, border-color .14s ease;
 }
-.ph-tile.ph-tile-focus { border-color: var(--accent); }
+/* Glass lives on a background LAYER, not on .ph-tile itself — so the tile never
+   becomes a containing block and in-tile position:fixed menus (file-tree context
+   menu) escape to the viewport instead of being clipped by the tile. */
+.ph-tile::before {
+  content: ""; position: absolute; inset: 0; z-index: -1; border-radius: inherit;
+  background: color-mix(in srgb, var(--ph-panel) calc(var(--panel-alpha, 1) * 100%), transparent);
+  -webkit-backdrop-filter: blur(var(--panel-blur, 0px)) saturate(var(--panel-sat, 1));
+  backdrop-filter: blur(var(--panel-blur, 0px)) saturate(var(--panel-sat, 1));
+}
+/* focused island breathes an accent glow instead of a hard border swap */
+.ph-tile.ph-tile-focus {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--ph-line));
+  box-shadow: var(--shadow-island), inset 0 1px 0 var(--ph-rim),
+              0 0 0 1px var(--accent), 0 0 26px -7px var(--accent-glow);
+}
 .ph-tile-bar {
   flex: 0 0 auto;
   display: flex;
   align-items: center;
-  gap: 0.4rem;
-  padding: 0.25rem 0.5rem;
-  font-size: 0.8rem;
-  color: var(--muted);
-  border-bottom: 1px solid var(--border);
+  gap: 0.45rem;
+  padding: 0.3rem 0.55rem;
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  letter-spacing: 0.01em;
+  color: var(--ph-ink-2);
+  background: color-mix(in srgb, var(--ph-panel-2) 45%, transparent);
+  border-bottom: 1px solid var(--ph-line);
   cursor: grab;
   user-select: none;
 }
-.ph-tile-bar .ph-tile-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ph-tile-btn {
-  background: none; border: 0; color: var(--muted); cursor: pointer;
-  padding: 0 0.25rem; font-size: 0.85rem; line-height: 1; border-radius: 4px;
+/* type/accent dot at the head of every tile bar — the project signal, quietly */
+.ph-tile-dot {
+  width: 7px; height: 7px; flex: none; border-radius: 50%;
+  background: var(--accent); box-shadow: 0 0 7px -1px var(--accent);
 }
-.ph-tile-btn:hover { color: var(--fg); background: var(--border); }
+.ph-tile-bar .ph-tile-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ph-ink); }
+.ph-tile-btn {
+  background: none; border: 0; color: var(--ph-ink-2); cursor: pointer;
+  padding: 0.15rem 0.35rem; font-size: 0.9rem; line-height: 1; border-radius: var(--radius-sm);
+  transition: color .12s, background .12s;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.ph-tile-btn-lg { padding: 0.2rem 0.4rem; }
+.ph-tile-btn:hover { color: var(--ph-ink); background: var(--ph-panel-2); }
+.ph-tile-btn.ph-on { color: var(--accent); }
 .ph-tile-body { flex: 1; min-height: 0; position: relative; overflow: hidden; }
 
 /* ── drag-drop drop zones ─────────────────────────────────────────────────── */

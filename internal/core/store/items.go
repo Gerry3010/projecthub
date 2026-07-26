@@ -17,6 +17,7 @@ package store
 
 import (
 	"context"
+	"sort"
 
 	"github.com/Gerry3010/projecthub/internal/core/domain"
 )
@@ -79,9 +80,21 @@ func (s *Store) DeleteTodo(ctx context.Context, id string) error {
 	return s.api.DeleteEntry(ctx, id)
 }
 
-// ListTodos fetches and decrypts every todo in a project folder.
+// ListTodos fetches and decrypts every todo in a project folder, sorted by the
+// manual Order (ascending), tie-breaking by CreatedAt (newest first) so legacy
+// todos (all Order 0) keep their original newest-first ordering.
 func (s *Store) ListTodos(ctx context.Context, projectFolderID string) ([]Item[domain.TodoItem], error) {
-	return listItems[domain.TodoItem](ctx, s, projectFolderID, domain.KindTodo)
+	items, err := listItems[domain.TodoItem](ctx, s, projectFolderID, domain.KindTodo)
+	if err != nil {
+		return nil, err
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].Val.Order != items[j].Val.Order {
+			return items[i].Val.Order < items[j].Val.Order
+		}
+		return items[i].Val.CreatedAt.After(items[j].Val.CreatedAt)
+	})
+	return items, nil
 }
 
 // ─── pinned items ───────────────────────────────────────────────────────────
@@ -98,6 +111,12 @@ func (s *Store) ListPins(ctx context.Context, projectFolderID string) ([]Item[do
 
 func (s *Store) CreateCodeSession(ctx context.Context, projectFolderID string, cs domain.CodeSession) (string, error) {
 	return s.putEntry(ctx, &projectFolderID, domain.KindCodeSession, cs)
+}
+
+// UpdateCodeSession re-encrypts an existing code-session entry in place (e.g.
+// renaming its Title).
+func (s *Store) UpdateCodeSession(ctx context.Context, id, projectFolderID string, cs domain.CodeSession) error {
+	return s.updateEntry(ctx, id, &projectFolderID, domain.KindCodeSession, cs)
 }
 
 func (s *Store) ListCodeSessions(ctx context.Context, projectFolderID string) ([]Item[domain.CodeSession], error) {

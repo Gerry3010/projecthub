@@ -3,7 +3,7 @@
 PASSBUBBLE_URL ?= http://localhost:8080
 PORT           ?= 8090
 
-.PHONY: all wasm server sidecar tabhost run tui test vet build clean
+.PHONY: all wasm server sidecar tabhost phmcp run tui test vet build clean
 
 all: build
 
@@ -23,6 +23,10 @@ sidecar:
 tabhost:
 	go build -o build/tabhost ./cmd/tabhost
 
+## phmcp: build the MCP stdio bridge Claude Code launches → build/phmcp
+phmcp:
+	go build -o build/phmcp ./cmd/phmcp
+
 ## shell: bundle the renderer island layer (xterm/markdown/webview) → web/shell.js
 shell:
 	cd app && npm run build:shell
@@ -31,8 +35,8 @@ shell:
 tui:
 	go build -o build/tui ./cmd/tui
 
-## build: wasm frontend + server + sidecar + native-messaging host
-build: wasm server sidecar tabhost
+## build: wasm frontend + server + sidecar + native-messaging host + MCP bridge
+build: wasm server sidecar tabhost phmcp
 
 ## run: build the wasm frontend, then run the server (serves on $(PORT))
 run: wasm

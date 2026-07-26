@@ -6,7 +6,7 @@
 // port + token are injected into the renderer via the preload bridge (window.phNative)
 // so the WASM UI can call the token-guarded /native API for local-machine actions.
 
-import { app, BrowserWindow, session, WebContents, ipcMain, safeStorage } from "electron";
+import { app, BrowserWindow, session, WebContents, ipcMain, safeStorage, Notification } from "electron";
 import { spawn, ChildProcess } from "node:child_process";
 import * as readline from "node:readline";
 import * as path from "node:path";
@@ -101,10 +101,16 @@ function onSidecarExit(code: number | null): void {
 function loadRenderer(hs: Handshake): void {
   const base = `http://127.0.0.1:${hs.port}`;
   if (!win || win.isDestroyed()) {
+    // Opt-in window transparency (device-local, from the secure store). A transparent
+    // window must be created transparent — it can't be toggled at runtime — so the
+    // toggle in Settings writes the flag and relaunches. When on, the deck/wallpaper
+    // fade with --app-alpha so the desktop shows through behind ProjectHub.
+    const transparent = secureGet("window.transparent") === "1";
     win = new BrowserWindow({
       width: 1280,
       height: 820,
-      backgroundColor: "#0f1115",
+      transparent,
+      backgroundColor: transparent ? "#00000000" : "#0f1115",
       webPreferences: {
         preload: path.join(__dirname, "preload.js"),
         contextIsolation: true,
@@ -169,6 +175,18 @@ function decodeSecure(stored: string): string {
   }
   return "";
 }
+/** Read a decoded secure-store value (main-process side), "" if absent/corrupt. */
+function secureGet(key: string): string {
+  const store = readSecureStore();
+  return key in store ? decodeSecure(store[key]) : "";
+}
+/** Write a decoded value into the secure store (encrypted at rest). */
+function secureSet(key: string, val: string): void {
+  const store = readSecureStore();
+  store[key] = encodeSecure(val);
+  writeSecureStore(store);
+}
+
 function registerSecureStore(): void {
   ipcMain.on("ph-secure", (e, req: { op: string; key: string; val?: string }) => {
     const store = readSecureStore();
@@ -192,6 +210,35 @@ function registerSecureStore(): void {
   });
 }
 
+/** Window controls from the renderer. Currently: opt-in transparency, which needs a
+ *  relaunch because a BrowserWindow's `transparent` can only be set at creation. */
+function registerWindowControls(): void {
+  ipcMain.on("ph-window", (e, req: { op: string; on?: boolean }) => {
+    switch (req.op) {
+      case "get-transparent":
+        e.returnValue = secureGet("window.transparent") === "1";
+        return;
+      case "set-transparent":
+        secureSet("window.transparent", req.on ? "1" : "");
+        e.returnValue = true;
+        // Recreate the process so the window is (re)built with the new transparency.
+        app.relaunch();
+        app.exit(0);
+        return;
+      default:
+        e.returnValue = null;
+    }
+  });
+}
+
+/** Show native OS notifications on request from the renderer (todo reminders). */
+function registerNotifications(): void {
+  ipcMain.on("ph-notify", (_e, req: { title?: string; body?: string }) => {
+    if (!Notification.isSupported()) return;
+    new Notification({ title: req.title || "ProjectHub", body: req.body || "" }).show();
+  });
+}
+
 /** Lock down every browser-tile guest: popups become in-tile tabs (handled in the
  *  guest preload), so deny native window opens, and deny permission prompts (MVP). */
 function hardenWebviewGuests(): void {
@@ -210,6 +257,8 @@ function hardenWebviewGuests(): void {
 
 app.whenReady().then(async () => {
   registerSecureStore();
+  registerWindowControls();
+  registerNotifications();
   hardenWebviewGuests();
   try {
     const hs = await startSidecar();

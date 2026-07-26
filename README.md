@@ -52,6 +52,28 @@ make vet         # native + wasm vet
 
 Dann http://localhost:8090 öffnen und mit dem Passbubble-Konto anmelden.
 
+## MCP (Claude Code steuert den Workspace)
+
+Der Sidecar stellt einen MCP-Server bereit, mit dem Claude Code — laufend im
+eingebetteten Terminal eines Projekts — den Workspace treibt: Tiles auflisten/anlegen/
+schließen/fokussieren, Todos lesen/anlegen, Projekte/Sessions lesen, Dateien lesen/
+schreiben. Vault- und Tile-Tools laufen im WASM-Renderer (nur dort liegen die
+Passbubble-Schlüssel und der Tiling-Baum); der Sidecar reicht sie über einen
+Long-Poll-Steuerkanal dorthin weiter. Die Brücke ist `cmd/phmcp` (stdio-MCP-Server),
+die den Sidecar per Discovery-Datei findet — kein Port/Token nötig.
+
+Einrichtung (einmalig, `phmcp` muss gebaut + auf `PATH` sein — `make phmcp`):
+
+```bash
+claude mcp add projecthub -- phmcp
+# oder projektweit eine .mcp.json:
+# { "mcpServers": { "projecthub": { "command": "phmcp" } } }
+```
+
+Backlog (Folge-PR): `browser.*`-Tools (über die Extension-Command-Queue),
+`layout.sort`, `project_create`, sowie ein automatisches `--mcp-config` beim
+Claude-Terminal-Start.
+
 ## Status
 
 Phase 0 + Foundation: geteilter Kern (Krypto WASM-kompatibel + wire-kompatibel,

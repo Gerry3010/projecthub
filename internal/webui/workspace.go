@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -40,22 +41,42 @@ type Workspace struct {
 	Ref    domain.ProjectRef
 	Back   func(ctx app.Context)
 	Native *nativeclient.Client // nil in the hosted browser build
+	// RegisterClaudeOpener lets the app-wide Claude sidebar (Root) open a Claude
+	// terminal in THIS workspace; called once on mount with a ready-to-use opener.
+	RegisterClaudeOpener func(open func(ctx app.Context, cwd, prompt string))
+	// OnColor notifies the parent (Root) that this project's accent changed, so it can
+	// keep its project list (and thus the rail dot) in sync. nil in the hosted build.
+	OnColor func(color string)
 
 	layout   domain.Layout
 	layoutID string
 	loaded   bool
 	status   string
-	addOpen  bool // add-tile menu visible
+	addOpen  bool   // add-tile menu visible
+	focused  string // pane id highlighted by the MCP tile_focus tool ("" = none)
 
-	// appearance / background
-	accountBg  *domain.Background
-	apprOpen   bool
-	apprScope  string // "project" | "account"
-	bgImageURL string // cached resolved data URL for the current wallpaper image
+	// tile ⋯ overflow menu: which pane's menu is open + where to anchor it (viewport
+	// coords). Rendered as a workspace-root popover so the tile's overflow:hidden and
+	// backdrop-filter don't clip it.
+	menuPane string
+	menuX    int
+	menuY    int
+
+	ctlStop chan struct{} // stops the MCP control long-poll loop
+
+	// appearance / background (the editing UI lives in the shared bgEditor component)
+	accountBg *domain.Background
+	apprOpen  bool
+	apprScope string // "project" | "account" — seeds the bgEditor's initial scope
 
 	saveTimer *time.Timer
-	bgTimer   *time.Timer
 }
+
+// CompoID keys the workspace by project ID (go-app DismountEnforcer). Switching
+// projects via the rail changes the ID, so go-app dismounts the old workspace and
+// mounts a fresh one — re-running OnMount to load (restore) the new project's saved
+// layout/sessions instead of reusing the previous project's stale state.
+func (w *Workspace) CompoID() string { return "ws:" + w.Ref.ID }
 
 func (w *Workspace) OnMount(ctx app.Context) {
 	// Report divider-drag ratios from JS back into the layout tree.
@@ -76,6 +97,39 @@ func (w *Workspace) OnMount(ctx app.Context) {
 		}
 		return nil
 	}))
+	// Persist the editor tile's currently-open file path (JS island owns the editor;
+	// this records the path so the tile reopens the same file after relayout/restart
+	// and the tile label shows the filename). Args: paneID, path.
+	app.Window().Set("phEditorState", app.FuncOf(func(_ app.Value, args []app.Value) any {
+		if len(args) >= 2 {
+			paneID, path := args[0].String(), args[1].String()
+			ctx.Dispatch(func(app.Context) {
+				w.setParam(paneID, "path", path)
+				w.persistSoon()
+			})
+		}
+		return nil
+	}))
+	// Persist the editor tile's CodeMirror theme, scoped global (RootIndex) or per-
+	// project (manifest + mirror), chosen in the editor's theme picker. Args: key, scope.
+	app.Window().Set("phSetEditorTheme", app.FuncOf(func(_ app.Value, args []app.Value) any {
+		if len(args) >= 2 {
+			key, scope := args[0].String(), args[1].String()
+			ctx.Async(func() {
+				var err error
+				if scope == "project" {
+					err = w.Store.SetProjectEditorTheme(context.Background(), w.Ref.ID, key)
+					ctx.Dispatch(func(app.Context) { w.Ref.EditorTheme = key })
+				} else {
+					err = w.Store.SetEditorTheme(context.Background(), key)
+				}
+				if err != nil {
+					ctx.Dispatch(func(app.Context) { w.status = err.Error() })
+				}
+			})
+		}
+		return nil
+	}))
 	// Persist the browser tile's account-level default search engine (chosen in the
 	// tile's engine picker) into the Passbubble-backed RootIndex, so it syncs devices.
 	app.Window().Set("phSetSearchEngine", app.FuncOf(func(_ app.Value, args []app.Value) any {
@@ -92,10 +146,30 @@ func (w *Workspace) OnMount(ctx app.Context) {
 	if w.apprScope == "" {
 		w.apprScope = "project"
 	}
+	w.startControlLoop(ctx) // MCP: let Claude Code drive this workspace
+	// Let the app-wide Claude sidebar open Claude terminals in this workspace.
+	if w.RegisterClaudeOpener != nil {
+		w.RegisterClaudeOpener(func(ctx app.Context, cwd, prompt string) {
+			if cwd == "" {
+				cwd = w.Ref.LocalPath
+			}
+			w.addTile(domain.TileTerminal, map[string]string{"cwd": cwd, "cmd": "claude", "prompt": prompt})
+		})
+	}
 	ctx.Async(func() {
 		item, err := w.Store.GetLayout(context.Background(), w.Ref.FolderID)
 		accountBg, _ := w.Store.Background(context.Background())
 		searchEngine, _ := w.Store.SearchEngine(context.Background())
+		accountTheme, _ := w.Store.EditorTheme(context.Background())
+		editorTheme := w.Ref.EditorTheme // project override wins
+		if editorTheme == "" {
+			editorTheme = accountTheme
+		}
+		accountUITheme, _ := w.Store.Theme(context.Background())
+		uiTheme := w.Ref.Theme // project override wins
+		if uiTheme == "" {
+			uiTheme = accountUITheme
+		}
 		eff := w.Ref.Background
 		if eff == nil {
 			eff = accountBg
@@ -109,14 +183,21 @@ func (w *Workspace) OnMount(ctx app.Context) {
 				w.layout.Root = newLeaf(domain.TileTerminal, map[string]string{"cwd": w.Ref.LocalPath})
 			}
 			w.accountBg = accountBg
-			w.bgImageURL = imgURL
 			w.loaded = true
 			applyBackground(eff, imgURL)
+			setDocTheme(uiTheme) // resolved UI theme (project override ⇒ else account)
 			// Push the account default engine into the shell so all browser tiles
 			// (and their pickers) use it; empty ⇒ shell keeps its own default.
 			if searchEngine != "" {
 				if shell := app.Window().Get("phShell"); shell.Truthy() {
 					shell.Call("applySearchEngine", searchEngine)
+				}
+			}
+			// Push the resolved editor theme (project override ⇒ else account) so all
+			// editor tiles adopt it; empty ⇒ shell keeps its built-in default.
+			if editorTheme != "" {
+				if shell := app.Window().Get("phShell"); shell.Truthy() {
+					shell.Call("applyEditorTheme", editorTheme)
 				}
 			}
 		})
@@ -125,6 +206,14 @@ func (w *Workspace) OnMount(ctx app.Context) {
 
 // OnDismount tears down every live island so PTYs/webviews don't outlive the project.
 func (w *Workspace) OnDismount() {
+	// Flush any debounced layout save so switching projects never loses the last
+	// change (added/closed/resized tile) made within the save window.
+	if w.saveTimer != nil {
+		w.saveTimer.Stop()
+		w.saveTimer = nil
+		w.persist()
+	}
+	w.stopControlLoop()
 	shell := app.Window().Get("phShell")
 	if !shell.Truthy() {
 		return
@@ -144,7 +233,51 @@ func (w *Workspace) Render() app.UI {
 		app.Div().Class("ph-ws-wallpaper"),
 		w.toolbar(),
 		app.Div().Class("ph-ws-body").Body(w.renderNode(w.layout.Root)),
-		app.If(w.apprOpen, w.appearancePanel),
+		app.If(w.apprOpen, func() app.UI {
+			return app.Div().Body(
+				// outside-click catcher: closes the panel when clicking anywhere else
+				app.Div().Class("ph-backdrop").OnClick(func(ctx app.Context, _ app.Event) { w.apprOpen = false }),
+				w.appearancePanel(),
+			)
+		}),
+		app.If(w.menuPane != "", w.tileMenuPopover),
+	)
+}
+
+// tileMenuPopover draws the open tile's ⋯ overflow menu at the workspace root, anchored
+// at the click coords, so it escapes the tile's overflow:hidden/backdrop-filter clip.
+func (w *Workspace) tileMenuPopover() app.UI {
+	leaf := findLeaf(w.layout.Root, w.menuPane)
+	if leaf == nil {
+		w.menuPane = ""
+		return app.Div()
+	}
+	items := w.tileMenu(leaf)
+	return app.Div().Body(
+		app.Div().Class("ph-backdrop").OnClick(func(ctx app.Context, _ app.Event) { w.menuPane = "" }),
+		app.Div().Class("ph-menu ph-tile-menu").
+			Style("top", strconv.Itoa(w.menuY)+"px").
+			Style("left", strconv.Itoa(w.menuX)+"px").
+			Body(
+				app.Range(items).Slice(func(i int) app.UI {
+					a := items[i]
+					cls := "ph-menu-item"
+					if a.Danger {
+						cls += " ph-menu-item-danger"
+					}
+					return app.Button().Class(cls).OnClick(func(ctx app.Context, e app.Event) {
+						w.menuPane = ""
+						if a.OnClick != nil {
+							a.OnClick(ctx, e)
+						}
+					}).Body(
+						app.If(a.SVG != "" || a.Icon != "", func() app.UI {
+							return app.Span().Class("ph-menu-icon").Body(a.glyph(15))
+						}),
+						app.Span().Text(a.Label),
+					)
+				}),
+			),
 	)
 }
 
@@ -161,14 +294,23 @@ func (w *Workspace) toolbar() app.UI {
 		app.Span().Class("ph-tile-title").Text(w.Ref.Title),
 		app.Div().Class("ph-spacer"),
 		app.If(w.status != "", func() app.UI { return app.Span().Class("ph-muted").Text(w.status) }),
-		swatchBar(w.Ref.AccentColor(), w.pickColor, w.customColor),
-		app.Button().Class("ph-tile-btn").Title("Aussehen / Hintergrund").Text("🎨").
-			OnClick(func(ctx app.Context, _ app.Event) { w.apprOpen = !w.apprOpen }),
+		&accentPicker{Current: w.Ref.AccentColor(), OnPick: w.pickColor, OnCustom: w.customColor},
+		app.Button().Class("ph-tile-btn ph-tile-btn-lg").Title("Aussehen / Hintergrund").
+			OnClick(func(ctx app.Context, _ app.Event) { w.apprOpen = !w.apprOpen }).
+			Body(icon("sliders", 17)),
 		app.Div().Class("ph-add").Body(
 			app.Button().Class("ph-btn").Text("+ Tile").OnClick(func(ctx app.Context, _ app.Event) {
 				w.addOpen = !w.addOpen
 			}),
-			app.If(w.addOpen, w.addMenu),
+			app.If(w.addOpen, func() app.UI {
+				return app.Div().Body(
+					// Outside-click catcher: closes the menu when clicking anywhere else.
+					app.Div().Class("ph-backdrop").OnClick(func(ctx app.Context, _ app.Event) {
+						w.addOpen = false
+					}),
+					w.addMenu(),
+				)
+			}),
 		),
 	)
 }
@@ -185,6 +327,8 @@ func (w *Workspace) addMenu() app.UI {
 		opt("Terminal", domain.TileTerminal, map[string]string{"cwd": cwd}),
 		opt("Terminal (Claude)", domain.TileTerminal, map[string]string{"cwd": cwd, "cmd": "claude"}),
 		opt("Markdown-Preview", domain.TileMarkdown, map[string]string{"path": ""}),
+		opt("Code-Editor", domain.TileEditor, map[string]string{"path": ""}),
+		opt("Dateien (lokal)", domain.TileFileTree, map[string]string{"path": cwd}),
 		opt("Browser", domain.TileBrowser, map[string]string{"url": "about:blank"}),
 		opt("Notizen", domain.TileNotes, nil),
 		opt("Todo", domain.TileTodo, nil),
@@ -193,6 +337,7 @@ func (w *Workspace) addMenu() app.UI {
 		opt("Browser-Tabs", domain.TileTabs, nil),
 		opt("Claude", domain.TileClaude, nil),
 		opt("Pipepush", domain.TilePipepush, nil),
+		opt("Passbubble", domain.TilePassbubble, nil),
 	)
 }
 
@@ -244,13 +389,23 @@ func (v *nodeView) Render() app.UI {
 
 func (w *Workspace) renderTile(n *domain.LayoutNode) app.UI {
 	paneID := n.PaneID
+	cls := "ph-tile"
+	if paneID == w.focused {
+		cls += " ph-tile-focus"
+	}
 	// The whole tile is the DROP target, but only the titlebar is draggable — else a
 	// drag started inside a terminal/webview and the tile could vanish.
-	return app.Div().Class("ph-tile").Attr("data-pane", paneID).
+	return app.Div().Class(cls).Attr("data-pane", paneID).
 		OnDragOver(func(ctx app.Context, e app.Event) { e.PreventDefault() }).
 		OnDrop(func(ctx app.Context, e app.Event) {
 			e.PreventDefault()
-			src := e.Get("dataTransfer").Call("getData", "text/plain").String()
+			dt := e.Get("dataTransfer")
+			// A file dragged from a file tree onto this tile → open it here.
+			if p := dt.Call("getData", "application/x-ph-path").String(); p != "" {
+				w.dropPathInTile(ctx, paneID, p)
+				return
+			}
+			src := dt.Call("getData", "text/plain").String()
 			if src != "" && src != paneID {
 				w.dropTile(src, paneID, dropEdge(ctx.JSSrc(), e))
 			}
@@ -263,18 +418,26 @@ func (w *Workspace) renderTile(n *domain.LayoutNode) app.UI {
 
 func (w *Workspace) tileBar(n *domain.LayoutNode) app.UI {
 	paneID := n.PaneID
+	actions := w.tileActions(n)
 	return app.Div().Class("ph-tile-bar").
 		Attr("draggable", true).
 		OnDragStart(func(ctx app.Context, e app.Event) {
 			e.Get("dataTransfer").Call("setData", "text/plain", paneID)
 		}).
 		Body(
+			app.Span().Class("ph-tile-dot"),
 			app.Span().Class("ph-tile-title").Text(tileLabel(n)),
-			app.Button().Class("ph-tile-btn").Title("horizontal teilen").Text("⇆").OnClick(func(ctx app.Context, _ app.Event) {
-				w.splitTile(paneID, "row")
+			// tile-contributed action buttons (declared, never custom chrome)
+			app.Range(actions).Slice(func(i int) app.UI {
+				a := actions[i]
+				return app.Button().Class("ph-tile-btn").Title(a.Label).
+					OnClick(a.OnClick).Body(a.glyph(15))
 			}),
-			app.Button().Class("ph-tile-btn").Title("vertikal teilen").Text("⇅").OnClick(func(ctx app.Context, _ app.Event) {
-				w.splitTile(paneID, "col")
+			// ⋯ overflow: split + any tile menu actions, drawn at the workspace root
+			app.Button().Class("ph-tile-btn").Title("mehr").Text("⋯").OnClick(func(ctx app.Context, e app.Event) {
+				w.menuPane = paneID
+				w.menuX = e.Get("clientX").Int()
+				w.menuY = e.Get("clientY").Int()
 			}),
 			app.Button().Class("ph-tile-btn").Title("schließen").Text("✕").OnClick(func(ctx app.Context, _ app.Event) {
 				w.closeTile(paneID)
@@ -282,18 +445,58 @@ func (w *Workspace) tileBar(n *domain.LayoutNode) app.UI {
 		)
 }
 
+// tileActions are a tile's primary action buttons, shown inline in its bar. Only
+// declared actions are allowed — tiles never render their own chrome.
+func (w *Workspace) tileActions(n *domain.LayoutNode) []TileAction {
+	switch n.Type {
+	case domain.TileEditor:
+		paneID := n.PaneID
+		return []TileAction{
+			{SVG: "save", Label: "Speichern (⌘S)", OnClick: func(ctx app.Context, _ app.Event) { w.callEditor("phEditorSave", paneID) }},
+			{SVG: "external", Label: "In VS Code öffnen", OnClick: func(ctx app.Context, _ app.Event) { w.callEditor("phEditorOpenInCode", paneID) }},
+		}
+	}
+	return nil
+}
+
+// tileMenu is the ⋯ overflow content: the universal split actions plus any
+// type-specific secondary actions.
+func (w *Workspace) tileMenu(n *domain.LayoutNode) []TileAction {
+	paneID := n.PaneID
+	return []TileAction{
+		{Icon: "⇆", Label: "Horizontal teilen", OnClick: func(ctx app.Context, _ app.Event) { w.splitTile(paneID, "row") }},
+		{Icon: "⇅", Label: "Vertikal teilen", OnClick: func(ctx app.Context, _ app.Event) { w.splitTile(paneID, "col") }},
+	}
+}
+
+// callEditor invokes a per-pane editor bridge (phEditorSave/phEditorOpenInCode)
+// registered by the JS editor island for paneID; a no-op if the bridge is absent.
+func (w *Workspace) callEditor(fn, paneID string) {
+	if f := app.Window().Get(fn); f.Truthy() {
+		f.Invoke(paneID)
+	}
+}
+
 func (w *Workspace) renderTileBody(n *domain.LayoutNode) app.UI {
 	switch n.Type {
-	case domain.TileTerminal, domain.TileBrowser, domain.TileMarkdown:
+	case domain.TileTerminal, domain.TileBrowser, domain.TileMarkdown, domain.TileEditor:
 		return w.islandTile(n)
 	case domain.TileNotes:
 		return &notesTile{Store: w.Store, FolderID: w.Ref.FolderID}
 	case domain.TileTodo:
 		return &todoTile{Store: w.Store, FolderID: w.Ref.FolderID}
 	case domain.TileFiles:
-		return &filesTile{Store: w.Store, FolderID: w.Ref.FolderID}
+		return &filesTile{Store: w.Store, Native: w.Native, FolderID: w.Ref.FolderID,
+			LocalRoot: w.Ref.LocalPath, PaneID: n.PaneID, OpenEditor: w.openEditorFor}
+	case domain.TileFileTree:
+		root := n.Params["path"]
+		if root == "" {
+			root = w.Ref.LocalPath
+		}
+		return &fileTreeTile{Native: w.Native, Store: w.Store, FolderID: w.Ref.FolderID,
+			PaneID: n.PaneID, Root: root, OpenEditor: w.openEditorFor, OpenTile: w.openTileFor}
 	case domain.TileSessions:
-		return &sessionsTile{Store: w.Store, FolderID: w.Ref.FolderID, Cwd: w.Ref.LocalPath,
+		return &sessionsTile{Store: w.Store, Native: w.Native, FolderID: w.Ref.FolderID, Cwd: w.Ref.LocalPath,
 			OpenTerminal: func(ctx app.Context, cwd, sessionID string) {
 				w.addTile(domain.TileTerminal, map[string]string{"cwd": cwd, "session_id": sessionID})
 			}}
@@ -306,6 +509,8 @@ func (w *Workspace) renderTileBody(n *domain.LayoutNode) app.UI {
 			}}
 	case domain.TilePipepush:
 		return &pipepushTile{Store: w.Store, Native: w.Native, FolderID: w.Ref.FolderID}
+	case domain.TilePassbubble:
+		return &passbubbleTile{Store: w.Store, FolderID: w.Ref.FolderID}
 	default:
 		return app.Div().Class("ph-muted").Text("Unbekannter Tile-Typ")
 	}
@@ -403,7 +608,9 @@ func (w *Workspace) parkIslands() {
 	}
 }
 
-func (w *Workspace) addTile(t domain.TileType, params map[string]string) {
+// addTile appends a new tile (splitting the workspace to the right) and returns its
+// pane id.
+func (w *Workspace) addTile(t domain.TileType, params map[string]string) string {
 	w.parkIslands()
 	leaf := newLeaf(t, params)
 	if w.layout.Root == nil {
@@ -413,6 +620,7 @@ func (w *Workspace) addTile(t domain.TileType, params map[string]string) {
 		w.layout.Root = &domain.LayoutNode{Dir: "row", Ratio: 0.5, PaneID: uuid.NewString(), A: w.layout.Root, B: leaf}
 	}
 	w.persistSoon()
+	return leaf.PaneID
 }
 
 func (w *Workspace) splitTile(paneID, dir string) {
@@ -429,6 +637,95 @@ func (w *Workspace) splitTile(paneID, dir string) {
 	}
 	_ = side
 	w.persistSoon()
+}
+
+// splitWith splits the given pane (new tile on side B) with an explicit type+params,
+// returns the new leaf's pane id. Unlike splitTile it does not clone the source type.
+func (w *Workspace) splitWith(paneID, dir string, t domain.TileType, params map[string]string) string {
+	parent, _ := findParentOf(&w.layout.Root, paneID)
+	leaf := newLeaf(t, params)
+	w.parkIslands()
+	if parent == nil {
+		// paneID is the whole root leaf → wrap it in a split.
+		if w.layout.Root != nil {
+			w.layout.Root = &domain.LayoutNode{Dir: dir, Ratio: 0.5, PaneID: uuid.NewString(), A: w.layout.Root, B: leaf}
+		} else {
+			w.layout.Root = leaf
+		}
+		w.persistSoon()
+		return leaf.PaneID
+	}
+	old := *parent
+	*parent = &domain.LayoutNode{Dir: dir, Ratio: 0.5, PaneID: uuid.NewString(), A: old, B: leaf}
+	w.persistSoon()
+	return leaf.PaneID
+}
+
+// openTileFor opens params in a tile of type t: it reuses an existing tile of that
+// type (re-homing it onto the new params) or, if none exists, splits a fresh one in
+// next to the source tile. Focuses it either way. For island tiles (editor/markdown/
+// browser) the island is rebuilt (destroyIsland) so it reloads with the new params.
+func (w *Workspace) openTileFor(ctx app.Context, sourcePaneID string, t domain.TileType, params map[string]string) {
+	for _, leaf := range leaves(w.layout.Root) {
+		if leaf.Type != t {
+			continue
+		}
+		for k, v := range params {
+			w.setParam(leaf.PaneID, k, v)
+		}
+		if shell := app.Window().Get("phShell"); shell.Truthy() {
+			shell.Call("destroyIsland", leaf.PaneID) // rebuild → reloads with new params
+		}
+		w.focused = leaf.PaneID
+		w.persistSoon()
+		return
+	}
+	w.focused = w.splitWith(sourcePaneID, "row", t, params)
+}
+
+// openEditorFor opens a file path in an editor tile (reuse-or-split next to source).
+func (w *Workspace) openEditorFor(ctx app.Context, sourcePaneID, path string) {
+	w.openTileFor(ctx, sourcePaneID, domain.TileEditor, map[string]string{"path": path})
+}
+
+// dropPathInTile opens a file (dragged from a file tree) inside the tile it was
+// dropped on, by that tile's kind: editor/markdown load the path; browser navigates
+// to file://; a filetree drop moves the file into that tree's root. The island tiles
+// are rebuilt so they reload with the new params.
+func (w *Workspace) dropPathInTile(ctx app.Context, targetPaneID, srcPath string) {
+	leaf := findLeaf(w.layout.Root, targetPaneID)
+	if leaf == nil || srcPath == "" {
+		return
+	}
+	rebuild := func() {
+		if shell := app.Window().Get("phShell"); shell.Truthy() {
+			shell.Call("destroyIsland", targetPaneID)
+		}
+		w.focused = targetPaneID
+		w.persistSoon()
+	}
+	switch leaf.Type {
+	case domain.TileEditor, domain.TileMarkdown:
+		w.setParam(targetPaneID, "path", srcPath)
+		rebuild()
+	case domain.TileBrowser:
+		// Open the file fresh: set the initial URL and drop any saved tab state.
+		w.setParam(targetPaneID, "url", "file://"+srcPath)
+		w.setParam(targetPaneID, "tabs", "")
+		w.setParam(targetPaneID, "active", "")
+		rebuild()
+	case domain.TileFileTree:
+		if w.Native != nil {
+			dst := filepath.Join(leaf.Params["path"], filepath.Base(srcPath))
+			if dst != srcPath {
+				ctx.Async(func() {
+					if err := w.Native.Move(context.Background(), srcPath, dst); err != nil {
+						ctx.Dispatch(func(app.Context) { w.status = "Verschieben: " + err.Error() })
+					}
+				})
+			}
+		}
+	}
 }
 
 func (w *Workspace) closeTile(paneID string) {
@@ -551,8 +848,19 @@ func (w *Workspace) applyColor(ctx app.Context, color string) {
 	// go-app does NOT reliably re-apply an inline CSS custom property (--accent) on
 	// re-render, so the swatch click would have no visible effect. Set it on the
 	// workspace element directly, mirroring how the background vars are applied.
-	if ws := app.Window().Get("document").Call("querySelector", ".ph-workspace"); ws.Truthy() {
+	doc := app.Window().Get("document")
+	if ws := doc.Call("querySelector", ".ph-workspace"); ws.Truthy() {
 		ws.Get("style").Call("setProperty", "--accent", color)
+	}
+	// Live-update this project's rail dot too (it lives in the Root component, which
+	// this child event won't re-render) so the sidebar reflects the new colour at once.
+	if dot := doc.Call("querySelector", ".ph-rail-dot-active"); dot.Truthy() {
+		dot.Get("style").Call("setProperty", "--dot", color)
+	}
+	// Keep Root's project list in sync so a later Root render / project switch shows
+	// the new colour (best-effort; nil in tests).
+	if w.OnColor != nil {
+		w.OnColor(color)
 	}
 	ctx.Async(func() {
 		if err := w.Store.SetProjectColor(context.Background(), w.Ref.ID, color); err != nil {
@@ -688,12 +996,19 @@ func tileLabel(n *domain.LayoutNode) string {
 		return "Browser"
 	case domain.TileMarkdown:
 		return "Markdown"
+	case domain.TileEditor:
+		if p := n.Params["path"]; p != "" {
+			return "✎ " + filepath.Base(p)
+		}
+		return "Editor"
 	case domain.TileNotes:
 		return "Notizen"
 	case domain.TileTodo:
 		return "Todo"
 	case domain.TileFiles:
-		return "Dateien"
+		return "Dateien (Tresor)"
+	case domain.TileFileTree:
+		return "Dateien (lokal)"
 	case domain.TileSessions:
 		return "Claude-Sessions"
 	case domain.TileTabs:
@@ -702,6 +1017,8 @@ func tileLabel(n *domain.LayoutNode) string {
 		return "Claude"
 	case domain.TilePipepush:
 		return "Pipepush"
+	case domain.TilePassbubble:
+		return "Passbubble"
 	}
 	return string(n.Type)
 }

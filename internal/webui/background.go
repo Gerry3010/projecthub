@@ -46,7 +46,7 @@ func applyBackground(bg *domain.Background, imageURL string) {
 	set := func(k, v string) { style.Call("setProperty", k, v) }
 
 	if bg == nil {
-		clear("--bg-color", "--bg-image", "--panel-alpha", "--panel-blur", "--bg-dim")
+		clear("--bg-color", "--bg-image", "--panel-alpha", "--panel-blur", "--bg-dim", "--app-alpha")
 		return
 	}
 	if bg.Type == "color" && bg.Color != "" {
@@ -66,6 +66,11 @@ func applyBackground(bg *domain.Background, imageURL string) {
 	set("--panel-alpha", fmt.Sprintf("%.3f", alpha))
 	set("--panel-blur", fmt.Sprintf("%dpx", bg.Blur))
 	set("--bg-dim", fmt.Sprintf("%.3f", bg.Dim))
+	appAlpha := bg.AppAlpha
+	if appAlpha == 0 {
+		appAlpha = 1
+	}
+	set("--app-alpha", fmt.Sprintf("%.3f", appAlpha))
 }
 
 // resolveBgImageURL turns a background's image reference into a data URL: a local
@@ -75,6 +80,11 @@ func applyBackground(bg *domain.Background, imageURL string) {
 func resolveBgImageURL(st *store.Store, nc *nativeclient.Client, bg *domain.Background) string {
 	if bg == nil || bg.Type != "image" || bg.Image == "" {
 		return ""
+	}
+	// A bundled preset resolves to a same-origin static asset — no fetch/decrypt
+	// needed (CSP default-src 'self' allows it). presetURL guards the filename.
+	if file, ok := strings.CutPrefix(bg.Image, "preset:"); ok {
+		return presetURL(file)
 	}
 	if path, ok := strings.CutPrefix(bg.Image, "file:"); ok {
 		if !nc.Available() {
@@ -91,6 +101,25 @@ func resolveBgImageURL(st *store.Store, nc *nativeclient.Client, bg *domain.Back
 		return ""
 	}
 	return dataURL(fb) // reuse project.go's FileBlob → data URL
+}
+
+// windowTransparency reports whether the Electron window was created transparent
+// (opt-in, device-local). false in the hosted browser build (no phWindow bridge).
+func windowTransparency() (on, available bool) {
+	pw := app.Window().Get("phWindow")
+	if !pw.Truthy() {
+		return false, false
+	}
+	return pw.Call("getTransparent").Bool(), true
+}
+
+// setWindowTransparency persists the transparency flag and relaunches the app (a
+// window's transparency can only be set at creation). No-op without the bridge.
+func setWindowTransparency(on bool) {
+	pw := app.Window().Get("phWindow")
+	if pw.Truthy() {
+		pw.Call("setTransparent", on)
+	}
 }
 
 func bgDataURL(mime string, data []byte) string {

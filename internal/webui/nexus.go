@@ -75,3 +75,58 @@ func swatchBar(current string, onPick func(string) app.EventHandler, onCustom ap
 
 // eqColor compares two CSS hex colors case-insensitively.
 func eqColor(a, b string) bool { return strings.EqualFold(a, b) }
+
+// accentPicker is the compact colour control: a single box showing the CURRENT colour
+// that opens a popover with the preset swatches + a custom colour well. Replaces the
+// always-expanded swatchBar in the toolbar/header so the active colour is always the
+// one visible box. Same handler shape as swatchBar.
+type accentPicker struct {
+	app.Compo
+	Current  string
+	OnPick   func(string) app.EventHandler
+	OnCustom app.EventHandler
+	open     bool
+}
+
+func (a *accentPicker) Render() app.UI {
+	return app.Div().Class("ph-accent").Body(
+		app.Button().Class("ph-swatch ph-accent-cur").
+			Style("background", a.Current).
+			Attr("type", "button").Attr("title", "Projektfarbe ändern").Aria("label", "Farbe wählen").
+			OnClick(func(ctx app.Context, _ app.Event) { a.open = !a.open }),
+		app.If(a.open, func() app.UI {
+			return app.Div().Body(
+				app.Div().Class("ph-backdrop").OnClick(func(ctx app.Context, _ app.Event) { a.open = false }),
+				app.Div().Class("ph-accent-pop").Body(
+					app.Range(domain.DefaultPalette).Slice(func(i int) app.UI {
+						c := domain.DefaultPalette[i]
+						return app.Button().Class("ph-swatch").Style("background", c).
+							Attr("type", "button").Attr("title", c).
+							Aria("pressed", eqColor(a.Current, c)).
+							OnClick(func(ctx app.Context, e app.Event) {
+								// Update our own box immediately — the parent (Workspace/Root)
+								// is a different component and won't re-render from this child
+								// event, so a.Current would otherwise stay on the old colour.
+								a.Current = c
+								a.open = false
+								if a.OnPick != nil {
+									a.OnPick(c)(ctx, e)
+								}
+							})
+					}),
+					app.Label().Class("ph-swatch ph-swatch-custom").Attr("title", "Eigene Farbe…").
+						Style("background", a.Current).Body(
+						app.Input().Type("color").Value(a.Current).
+							OnChange(func(ctx app.Context, e app.Event) {
+								a.Current = ctx.JSSrc().Get("value").String()
+								a.open = false
+								if a.OnCustom != nil {
+									a.OnCustom(ctx, e)
+								}
+							}),
+					),
+				),
+			)
+		}),
+	)
+}

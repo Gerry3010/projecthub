@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"context"
 	"testing"
+	"time"
 
 	"github.com/Gerry3010/projecthub/internal/core/domain"
 )
@@ -167,5 +168,75 @@ func TestBackgroundRoundTrip(t *testing.T) {
 	refs, _ := s.ListProjects(ctx)
 	if refs[0].Background == nil || refs[0].Background.Image != "file:/tmp/wall.jpg" {
 		t.Fatalf("project bg mirror missing: %+v", refs[0].Background)
+	}
+}
+
+func TestTodoOrderingAndFields(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	if _, err := s.CreateProject(ctx, "Todos", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	refs, _ := s.ListProjects(ctx)
+	folder := refs[0].FolderID
+
+	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	// Legacy (Order 0): should list newest-first by CreatedAt.
+	if _, err := s.CreateTodo(ctx, folder, domain.TodoItem{Text: "old", CreatedAt: base}); err != nil {
+		t.Fatalf("create old: %v", err)
+	}
+	if _, err := s.CreateTodo(ctx, folder, domain.TodoItem{Text: "new", CreatedAt: base.Add(time.Hour)}); err != nil {
+		t.Fatalf("create new: %v", err)
+	}
+	todos, err := s.ListTodos(ctx, folder)
+	if err != nil || len(todos) != 2 {
+		t.Fatalf("list todos: %v (%d)", err, len(todos))
+	}
+	if todos[0].Val.Text != "new" || todos[1].Val.Text != "old" {
+		t.Fatalf("legacy order should be newest-first, got %q,%q", todos[0].Val.Text, todos[1].Val.Text)
+	}
+
+	// Explicit Order wins over CreatedAt: put "old" first.
+	if err := s.UpdateTodo(ctx, todos[1].ID, folder, domain.TodoItem{Text: "old", CreatedAt: base, Order: 1}); err != nil {
+		t.Fatalf("reorder old: %v", err)
+	}
+	if err := s.UpdateTodo(ctx, todos[0].ID, folder, domain.TodoItem{Text: "new", CreatedAt: base.Add(time.Hour), Order: 2}); err != nil {
+		t.Fatalf("reorder new: %v", err)
+	}
+	todos, _ = s.ListTodos(ctx, folder)
+	if todos[0].Val.Text != "old" || todos[1].Val.Text != "new" {
+		t.Fatalf("explicit order should win, got %q,%q", todos[0].Val.Text, todos[1].Val.Text)
+	}
+
+	// Deadline/reminder pointers round-trip.
+	due := base.Add(48 * time.Hour)
+	if err := s.UpdateTodo(ctx, todos[0].ID, folder, domain.TodoItem{Text: "old", CreatedAt: base, Order: 1, DueAt: &due, RemindAt: &due}); err != nil {
+		t.Fatalf("set due: %v", err)
+	}
+	todos, _ = s.ListTodos(ctx, folder)
+	if todos[0].Val.DueAt == nil || !todos[0].Val.DueAt.Equal(due) || todos[0].Val.RemindAt == nil {
+		t.Fatalf("due/remind round-trip mismatch: %+v", todos[0].Val)
+	}
+}
+
+func TestCodeSessionUpdate(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	if _, err := s.CreateProject(ctx, "Sessions", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	refs, _ := s.ListProjects(ctx)
+	folder := refs[0].FolderID
+
+	id, err := s.CreateCodeSession(ctx, folder, domain.CodeSession{SessionID: "abc", Cwd: "/tmp/x"})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if err := s.UpdateCodeSession(ctx, id, folder, domain.CodeSession{SessionID: "abc", Title: "Renamed", Cwd: "/tmp/x"}); err != nil {
+		t.Fatalf("update session: %v", err)
+	}
+	got, err := s.ListCodeSessions(ctx, folder)
+	if err != nil || len(got) != 1 || got[0].Val.Title != "Renamed" {
+		t.Fatalf("rename round-trip mismatch: %v %+v", err, got)
 	}
 }

@@ -23,19 +23,23 @@ package nativeserver
 import (
 	"bytes"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"mime"
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/Gerry3010/projecthub/internal/control"
 	"github.com/Gerry3010/projecthub/internal/core/domain"
 	"github.com/Gerry3010/projecthub/internal/local"
 	"github.com/Gerry3010/projecthub/internal/ptyhost"
@@ -52,6 +56,7 @@ type Server struct {
 	token string
 	pty   *ptyhost.Host
 	tabs  *tabstate.Store
+	hub   *control.Hub // sidecar→renderer command channel for MCP renderer tools
 
 	// getServer/setServer back the /server endpoint: the desktop UI reads and
 	// changes the Passbubble upstream (device-local, account-independent). Nil ⇒
@@ -63,7 +68,7 @@ type Server struct {
 // New returns a native API server authenticated by token, using pty for terminals
 // and tabs for the live browser-tab state (fed by the native-messaging host).
 func New(token string, pty *ptyhost.Host, tabs *tabstate.Store) *Server {
-	return &Server{token: token, pty: pty, tabs: tabs}
+	return &Server{token: token, pty: pty, tabs: tabs, hub: control.New()}
 }
 
 // SetServerHooks wires the /server endpoint to the live Passbubble upstream: get
@@ -79,7 +84,9 @@ func (s *Server) Handler() http.Handler {
 	r.Get("/claude/suggestions", s.claudeSuggestions)
 	r.Get("/claude/sessions", s.claudeSessions)
 	r.Get("/claude/transcript", s.claudeTranscript)
+	r.Get("/claude/tasks", s.claudeTasks)
 	r.Post("/claude/resume", s.claudeResume)
+	r.Post("/claude/chat", s.claudeChat)
 	r.Post("/pty", s.ptyOpen)
 	r.Get("/pty/{id}/ws", s.ptyWS)
 	r.Delete("/pty/{id}", s.ptyClose)
@@ -87,6 +94,10 @@ func (s *Server) Handler() http.Handler {
 	r.Get("/server", s.serverGet)
 	r.Post("/server", s.serverSet)
 	r.Get("/file", s.fileRead)
+	r.Post("/file", s.fileWrite)
+	r.Get("/dir", s.dirList)
+	r.Post("/mkdir", s.dirMake)
+	r.Post("/move", s.fileMove)
 	r.Post("/tabs/ingest", s.tabsIngest)
 	r.Get("/tabs", s.tabsList)
 	r.Post("/projects", s.projectsSet)
@@ -97,6 +108,12 @@ func (s *Server) Handler() http.Handler {
 	r.Post("/pipepush/login", s.pipepushLogin)
 	r.Get("/pipepush/pipelines", s.pipepushPipelines)
 	r.Get("/pipepush/runs", s.pipepushRuns)
+	// MCP: cmd/phmcp bridges Claude Code's MCP calls to these; renderer tools are
+	// forwarded to the WASM UI over the control channel below.
+	r.Get("/mcp/tools", s.mcpTools)
+	r.Post("/mcp/call", s.mcpCall)
+	r.Get("/control/next", s.controlNext)
+	r.Post("/control/result", s.controlResult)
 	return r
 }
 
@@ -184,6 +201,22 @@ func (s *Server) claudeTranscript(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, entries)
 }
 
+// claudeTasks returns a session's task list (?session_id=…), read from
+// ~/.claude/tasks/<sessionId>/, so the Claude tile can show it as a checklist.
+func (s *Server) claudeTasks(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.URL.Query().Get("session_id")
+	if sessionID == "" {
+		http.Error(w, "missing session_id", http.StatusBadRequest)
+		return
+	}
+	tasks, err := tabsession.ScanClaudeTasks(sessionID)
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+	writeJSON(w, tasks)
+}
+
 // claudeResume opens a PTY running `claude --resume <sessionId>` in cwd and returns
 // its pty id; the client then attaches a WebSocket to stream it. The resume command
 // is defined once in internal/local (ResumeCommand) so the embedded and external
@@ -208,6 +241,46 @@ func (s *Server) claudeResume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]string{"pty_id": id})
+}
+
+// claudeChat runs one headless Claude turn (print mode) in cwd and returns immediately
+// with the session id. The process runs to completion in the background, writing the
+// normal session transcript (~/.claude/projects/<cwd>/<sessionId>.jsonl); the embedded
+// sidebar chat streams the reply by polling that transcript — no terminal, no PTY.
+func (s *Server) claudeChat(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Cwd          string `json:"cwd"`
+		Prompt       string `json:"prompt"`
+		SessionID    string `json:"session_id"`
+		SystemPrompt string `json:"system_prompt"`
+		Resume       bool   `json:"resume"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if req.Prompt == "" || req.SessionID == "" {
+		http.Error(w, "prompt and session_id required", http.StatusBadRequest)
+		return
+	}
+	cwd := req.Cwd
+	if cwd == "" { // sidebar on the home view has no project cwd — fall back to $HOME
+		if home, err := os.UserHomeDir(); err == nil {
+			cwd = home
+		}
+	}
+	name, args := local.ChatCommand(req.Prompt, req.SystemPrompt, req.SessionID, req.Resume)
+	cmd := exec.Command(name, args...)
+	cmd.Dir = cwd
+	cmd.Env = os.Environ() // inherit PATH so `claude` resolves like it does for the terminal
+	if err := cmd.Start(); err != nil {
+		httpError(w, err)
+		return
+	}
+	go func() { _ = cmd.Wait() }() // reap the child; the UI streams via the transcript
+	// Return the effective cwd so the UI polls the same transcript path (it may have
+	// fallen back to $HOME when the sidebar chats from the home view).
+	writeJSON(w, map[string]string{"session_id": req.SessionID, "cwd": cwd})
 }
 
 // ─── PTY ─────────────────────────────────────────────────────────────────────
@@ -251,16 +324,19 @@ func (s *Server) ptyClose(w http.ResponseWriter, r *http.Request) {
 // openIn opens a URL or filesystem path in the system's default handler.
 func (s *Server) openIn(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Type   string `json:"type"` // "url" | "path"
+		Type   string `json:"type"`           // "url" | "path"
 		Target string `json:"target"`
+		With   string `json:"with,omitempty"` // optional program, e.g. "code" (VS Code)
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Target == "" {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
 	var err error
-	switch req.Type {
-	case "path":
+	switch {
+	case req.With != "":
+		err = local.OpenWith(req.With, req.Target)
+	case req.Type == "path":
 		err = local.OpenPath(req.Target)
 	default:
 		err = local.OpenURL(req.Target)
@@ -529,6 +605,132 @@ func validPipepushBase(base string) bool {
 
 // maxFileRead caps a single /file response so a huge file can't exhaust memory.
 const maxFileRead = 25 << 20 // 25 MiB
+
+// fileWrite saves content to an absolute path (the editor tile's save action, and
+// the MCP file.write tool). It overwrites an existing regular file or creates a new
+// one (parent dir must exist); it refuses to clobber a directory/special file and
+// caps size at maxFileRead. Returns the new mtime so the editor's file-watch won't
+// treat its own save as an external change. Gated by the bearer token (loopback).
+func (s *Server) fileWrite(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Path string `json:"path"`
+		// Content is the file body as text; ContentB64 is a base64 alternative for
+		// binary data (e.g. syncing a vault blob to disk). At most one is set.
+		Content    string `json:"content"`
+		ContentB64 string `json:"content_b64,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if req.Path == "" || !filepath.IsAbs(req.Path) {
+		http.Error(w, "absolute path required", http.StatusBadRequest)
+		return
+	}
+	data := []byte(req.Content)
+	if req.ContentB64 != "" {
+		dec, err := base64.StdEncoding.DecodeString(req.ContentB64)
+		if err != nil {
+			http.Error(w, "bad base64", http.StatusBadRequest)
+			return
+		}
+		data = dec
+	}
+	if len(data) > maxFileRead {
+		http.Error(w, "file too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+	if fi, err := os.Stat(req.Path); err == nil && !fi.Mode().IsRegular() {
+		http.Error(w, "not a regular file", http.StatusBadRequest)
+		return
+	}
+	if err := os.WriteFile(req.Path, data, 0o644); err != nil {
+		httpError(w, err)
+		return
+	}
+	var mtime int64
+	if fi, err := os.Stat(req.Path); err == nil {
+		mtime = fi.ModTime().UnixNano()
+	}
+	writeJSON(w, map[string]string{"mtime": strconv.FormatInt(mtime, 10)})
+}
+
+// dirList returns a single directory's entries (?path=<abs>), folders first then
+// files alphabetically, for the file-tree tile's lazy per-folder expansion.
+// Unreadable/vanished entries are skipped rather than failing the whole listing.
+func (s *Server) dirList(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Query().Get("path")
+	if path == "" || !filepath.IsAbs(path) {
+		http.Error(w, "absolute path required", http.StatusBadRequest)
+		return
+	}
+	ents, err := os.ReadDir(path)
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+	out := make([]domain.DirEntry, 0, len(ents))
+	for _, e := range ents {
+		de := domain.DirEntry{Name: e.Name(), IsDir: e.IsDir()}
+		if info, err := e.Info(); err == nil {
+			de.Size = info.Size()
+		}
+		out = append(out, de)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].IsDir != out[j].IsDir {
+			return out[i].IsDir // folders first
+		}
+		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
+	})
+	writeJSON(w, out)
+}
+
+// fileMove moves/renames a file or folder (drag-and-drop in the file tree). Both
+// paths must be absolute; refuses to overwrite an existing destination.
+func (s *Server) fileMove(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Src string `json:"src"`
+		Dst string `json:"dst"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if req.Src == "" || req.Dst == "" || !filepath.IsAbs(req.Src) || !filepath.IsAbs(req.Dst) {
+		http.Error(w, "absolute src and dst required", http.StatusBadRequest)
+		return
+	}
+	if _, err := os.Stat(req.Dst); err == nil {
+		http.Error(w, "destination exists", http.StatusConflict)
+		return
+	}
+	if err := os.Rename(req.Src, req.Dst); err != nil {
+		httpError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// dirMake creates a directory (and any missing parents) at an absolute path.
+func (s *Server) dirMake(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Path string `json:"path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if req.Path == "" || !filepath.IsAbs(req.Path) {
+		http.Error(w, "absolute path required", http.StatusBadRequest)
+		return
+	}
+	if err := os.MkdirAll(req.Path, 0o755); err != nil {
+		httpError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
 
 // fileRead serves a local file's bytes: used for the markdown tile's live reload,
 // local background images, and file previews. With ?mtime=<unixnano>, it returns 304

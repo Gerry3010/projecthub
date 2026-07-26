@@ -11,6 +11,20 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import MarkdownIt from "markdown-it";
 import DOMPurify from "dompurify";
+import { EditorView, basicSetup } from "codemirror";
+import { EditorState, Compartment, type Extension } from "@codemirror/state";
+import { keymap } from "@codemirror/view";
+import { StreamLanguage } from "@codemirror/language";
+import { javascript } from "@codemirror/lang-javascript";
+import { json } from "@codemirror/lang-json";
+import { markdown } from "@codemirror/lang-markdown";
+import { css } from "@codemirror/lang-css";
+import { html } from "@codemirror/lang-html";
+import { python } from "@codemirror/lang-python";
+import { go } from "@codemirror/legacy-modes/mode/go";
+import { shell as shellMode } from "@codemirror/legacy-modes/mode/shell";
+import { oneDark } from "@codemirror/theme-one-dark";
+import { dracula, cobalt, tomorrow, solarizedLight, ayuLight, espresso } from "thememirror";
 import "@xterm/xterm/css/xterm.css";
 import "./styles.css";
 
@@ -108,6 +122,8 @@ function createIsland(paneID: string, type: string, params: Record<string, strin
       return mountMarkdown(el, params);
     case "browser":
       return mountBrowser(el, params, paneID);
+    case "editor":
+      return mountEditor(el, params, paneID);
     default:
       el.textContent = `Unbekannter Tile-Typ: ${type}`;
       return { el, type, cleanup: () => {} };
@@ -119,7 +135,10 @@ function createIsland(paneID: string, type: string, params: Record<string, strin
 function mountTerminal(el: HTMLElement, params: Record<string, string>): Island {
   const nat = phNative();
   const term = new Terminal({
-    fontFamily: 'ui-monospace, "JetBrains Mono", "Cascadia Code", monospace',
+    // "PH Nerd Symbols" is a bundled per-glyph fallback (theme.css) so Starship/
+    // powerline/git glyphs in prompts render instead of tofu; JetBrains Mono still
+    // supplies the base latin because it comes first.
+    fontFamily: '"JetBrains Mono", "PH Nerd Symbols", ui-monospace, "Cascadia Code", monospace',
     fontSize: 13,
     cursorBlink: true,
     theme: { background: "rgba(0,0,0,0)" },
@@ -256,6 +275,236 @@ function mountMarkdown(el: HTMLElement, params: Record<string, string>): Island 
   }
 
   return { el, type: "markdown", cleanup: () => timer !== undefined && clearInterval(timer) };
+}
+
+// ─── editor (CodeMirror) ──────────────────────────────────────────────────────
+
+// langForPath picks a CodeMirror language by file extension (plain text otherwise).
+function langForPath(path: string): Extension {
+  const ext = (path.split(".").pop() || "").toLowerCase();
+  switch (ext) {
+    case "js":
+    case "jsx":
+    case "cjs":
+    case "mjs":
+      return javascript({ jsx: true });
+    case "ts":
+    case "tsx":
+      return javascript({ jsx: true, typescript: true });
+    case "json":
+      return json();
+    case "md":
+    case "markdown":
+      return markdown();
+    case "css":
+      return css();
+    case "html":
+    case "htm":
+      return html();
+    case "py":
+      return python();
+    case "go":
+      return StreamLanguage.define(go);
+    case "sh":
+    case "bash":
+    case "zsh":
+      return StreamLanguage.define(shellMode);
+    default:
+      return [];
+  }
+}
+
+// ─── editor themes ────────────────────────────────────────────────────────────
+
+// Curated CodeMirror theme set for the editor tile. "default" = light baseline (no
+// theme extension). Keys are what go-app persists (account- or project-level).
+const EDITOR_THEMES: Record<string, { label: string; ext: Extension }> = {
+  default: { label: "Hell (Standard)", ext: [] },
+  "one-dark": { label: "One Dark", ext: oneDark },
+  dracula: { label: "Dracula", ext: dracula },
+  cobalt: { label: "Cobalt", ext: cobalt },
+  tomorrow: { label: "Tomorrow", ext: tomorrow },
+  "solarized-light": { label: "Solarized Light", ext: solarizedLight },
+  "ayu-light": { label: "Ayu Light", ext: ayuLight },
+  espresso: { label: "Espresso", ext: espresso },
+};
+const DEFAULT_EDITOR_THEME = "one-dark";
+const EDITOR_THEME_EVENT = "ph-editor-theme-changed";
+let currentEditorTheme = DEFAULT_EDITOR_THEME;
+
+// Each mounted editor registers its tile-level actions here, keyed by paneID, so the
+// standardized Go tile chrome can trigger them: window.phEditorSave(paneID) etc.
+const editorActions: Record<string, { save: () => void; openInCode: () => void }> = {};
+(window as any).phEditorSave = (id: string) => editorActions[id]?.save();
+(window as any).phEditorOpenInCode = (id: string) => editorActions[id]?.openInCode();
+
+function editorThemeExt(key: string): Extension {
+  return (EDITOR_THEMES[key] || EDITOR_THEMES[DEFAULT_EDITOR_THEME]).ext;
+}
+
+// applyEditorTheme is called BY go-app after loading the resolved (project|account)
+// theme, and by the in-editor picker: adopt it and live-reconfigure every open editor.
+function applyEditorTheme(key: string): void {
+  if (!EDITOR_THEMES[key]) return;
+  currentEditorTheme = key;
+  window.dispatchEvent(new CustomEvent(EDITOR_THEME_EVENT, { detail: key }));
+}
+
+// mountEditor is an in-tile CodeMirror file editor. It renders its own chrome (path
+// input + Save + "VS Code"), loads/saves via the sidecar's /native/file, and polls
+// for external changes — but never clobbers unsaved edits (dirty guard). The open
+// path is pushed back to go-app (phEditorState) for layout restore + the tile label.
+function mountEditor(el: HTMLElement, params: Record<string, string>, paneID: string): Island {
+  el.classList.add("ph-editor");
+  const nat = phNative();
+
+  // Slim navigation strip: which file + dirty state. Tile-level ACTIONS (Save, VS
+  // Code) live in the standardized tile chrome (Go), not here; the editor theme now
+  // lives in the global Settings screen. This bar only shows/edits the open path.
+  const bar = document.createElement("div");
+  bar.className = "ph-editor-bar";
+  const pathInput = document.createElement("input");
+  pathInput.className = "ph-island-input ph-editor-path";
+  pathInput.type = "text";
+  pathInput.placeholder = "/pfad/zur/datei";
+  pathInput.value = params.path || "";
+  const dirtyDot = document.createElement("span");
+  dirtyDot.className = "ph-editor-dirty";
+  bar.append(pathInput, dirtyDot);
+
+  const host = document.createElement("div");
+  host.className = "ph-editor-host";
+  el.append(bar, host);
+
+  let curPath = params.path || "";
+  let dirty = false;
+  let lastMtime = "";
+  const setDirty = (d: boolean) => {
+    dirty = d;
+    dirtyDot.textContent = d ? "●" : "";
+  };
+
+  const langComp = new Compartment();
+  const themeComp = new Compartment();
+  const view = new EditorView({
+    parent: host,
+    state: EditorState.create({
+      doc: "",
+      extensions: [
+        basicSetup,
+        langComp.of(langForPath(curPath)),
+        themeComp.of(editorThemeExt(currentEditorTheme)),
+        EditorView.updateListener.of((u) => {
+          if (u.docChanged) setDirty(true);
+        }),
+        keymap.of([{ key: "Mod-s", preventDefault: true, run: () => (void save(), true) }]),
+      ],
+    }),
+  });
+
+  // Live-reconfigure this editor when the theme changes (from the Settings screen's
+  // editor-theme picker or go-app's initial push).
+  const onThemeChange = (e: Event) => {
+    const key = (e as CustomEvent).detail as string;
+    view.dispatch({ effects: themeComp.reconfigure(editorThemeExt(key)) });
+  };
+  window.addEventListener(EDITOR_THEME_EVENT, onThemeChange);
+
+  const setDoc = (text: string) => {
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text } });
+    setDirty(false);
+  };
+
+  const load = async (path: string) => {
+    if (!nat || !path) return;
+    try {
+      const resp = await fetch(nat.base + "/native/file?path=" + encodeURIComponent(path), {
+        headers: { Authorization: "Bearer " + nat.token },
+      });
+      view.dispatch({ effects: langComp.reconfigure(langForPath(path)) });
+      if (!resp.ok) {
+        setDoc(`Kann Datei nicht lesen: ${path}`);
+        return;
+      }
+      lastMtime = resp.headers.get("X-Mtime") || "";
+      setDoc(await resp.text());
+    } catch {
+      /* transient */
+    }
+  };
+
+  const save = async () => {
+    if (!nat || !curPath) return;
+    try {
+      const r = await postJSON(nat, "/native/file", { path: curPath, content: view.state.doc.toString() });
+      lastMtime = r.mtime || lastMtime;
+      setDirty(false);
+    } catch {
+      /* keep dirty so the user can retry */
+    }
+  };
+
+  // Poll for external edits, but skip while the buffer is dirty so we never discard
+  // unsaved work.
+  const watch = async () => {
+    if (!nat || !curPath || dirty) return;
+    try {
+      const url = nat.base + "/native/file?path=" + encodeURIComponent(curPath) + "&mtime=" + lastMtime;
+      const resp = await fetch(url, { headers: { Authorization: "Bearer " + nat.token } });
+      if (resp.status === 304 || !resp.ok) return;
+      lastMtime = resp.headers.get("X-Mtime") || lastMtime;
+      setDoc(await resp.text());
+    } catch {
+      /* transient */
+    }
+  };
+
+  const openPath = (path: string) => {
+    curPath = path.trim();
+    (window as any).phEditorState?.(paneID, curPath);
+    void load(curPath);
+  };
+
+  // Accept a file dragged from a file-tree tile onto the editor body (capture phase,
+  // so we handle it before CodeMirror's own drop handling).
+  const onDragOver = (e: DragEvent) => {
+    if (e.dataTransfer?.types.includes("application/x-ph-path")) e.preventDefault();
+  };
+  const onDrop = (e: DragEvent) => {
+    const p = e.dataTransfer?.getData("application/x-ph-path");
+    if (p) {
+      e.preventDefault();
+      e.stopPropagation();
+      pathInput.value = p;
+      openPath(p);
+    }
+  };
+  el.addEventListener("dragover", onDragOver, true);
+  el.addEventListener("drop", onDrop, true);
+
+  pathInput.addEventListener("change", () => openPath(pathInput.value));
+
+  // Register this editor's tile-level actions for the Go tile chrome (Save, VS Code).
+  const openInCode = () => {
+    if (nat && curPath) postJSON(nat, "/native/openin", { type: "path", target: curPath, with: "code" }).catch(() => {});
+  };
+  editorActions[paneID] = { save: () => void save(), openInCode };
+
+  if (curPath) void load(curPath);
+  const watchTimer = window.setInterval(watch, 1500);
+
+  return {
+    el,
+    type: "editor",
+    cleanup: () => {
+      clearInterval(watchTimer);
+      window.removeEventListener(EDITOR_THEME_EVENT, onThemeChange);
+      el.removeEventListener("dragover", onDragOver, true);
+      el.removeEventListener("drop", onDrop, true);
+      delete editorActions[paneID];
+      view.destroy();
+    },
+  };
 }
 
 // ─── browser (Electron webview) — in-tile tab manager ─────────────────────────
@@ -1004,7 +1253,7 @@ function safeParse(s: string): Record<string, string> {
 // phShell is pure functions — expose immediately (go-app calls it long after load).
 // Browser navigation now lives entirely in the tile's own chrome (mountBrowser), so
 // the old top-level navigate() is gone; go-app only attaches/destroys islands.
-(window as any).phShell = { attachIsland, destroyIsland, parkIslands, applySearchEngine };
+(window as any).phShell = { attachIsland, destroyIsland, parkIslands, applySearchEngine, applyEditorTheme };
 
 // The DOM-touching init (drop-hint appends to <body>) must wait: this script runs in
 // <head>, where document.body is still null.

@@ -378,6 +378,116 @@ func (s *Store) SetSearchEngine(ctx context.Context, key string) error {
 	return s.saveIndex(ctx, idx)
 }
 
+// HomeView returns the account-level projects-home layout ("grid" default, or
+// "list").
+func (s *Store) HomeView(ctx context.Context) (string, error) {
+	idx, err := s.loadIndex(ctx)
+	if err != nil {
+		return "", err
+	}
+	if idx.HomeView == "" {
+		return "grid", nil
+	}
+	return idx.HomeView, nil
+}
+
+// SetHomeView persists the account-level projects-home layout in the RootIndex.
+func (s *Store) SetHomeView(ctx context.Context, view string) error {
+	idx, err := s.loadIndex(ctx)
+	if err != nil {
+		return err
+	}
+	idx.HomeView = view
+	return s.saveIndex(ctx, idx)
+}
+
+// EditorTheme returns the account-level default CodeMirror theme key (empty ⇒ the
+// client's built-in default).
+func (s *Store) EditorTheme(ctx context.Context) (string, error) {
+	idx, err := s.loadIndex(ctx)
+	if err != nil {
+		return "", err
+	}
+	return idx.EditorTheme, nil
+}
+
+// SetEditorTheme persists the account-level default CodeMirror theme in the RootIndex.
+func (s *Store) SetEditorTheme(ctx context.Context, key string) error {
+	idx, err := s.loadIndex(ctx)
+	if err != nil {
+		return err
+	}
+	idx.EditorTheme = key
+	return s.saveIndex(ctx, idx)
+}
+
+// SetProjectEditorTheme sets a project's CodeMirror theme override in both the
+// ph-manifest and its RootIndex mirror ("" clears it → inherit the account default).
+func (s *Store) SetProjectEditorTheme(ctx context.Context, projectID, key string) error {
+	idx, err := s.loadIndex(ctx)
+	if err != nil {
+		return err
+	}
+	i := indexOfProject(idx.Projects, projectID)
+	if i < 0 {
+		return fmt.Errorf("project %s not found", projectID)
+	}
+	folderID := idx.Projects[i].FolderID
+	entryID, manifest, err := s.projectManifest(ctx, folderID)
+	if err != nil {
+		return err
+	}
+	manifest.EditorTheme = key
+	if err := s.updateEntry(ctx, entryID, &folderID, domain.KindManifest, manifest); err != nil {
+		return err
+	}
+	idx.Projects[i].EditorTheme = key
+	return s.saveIndex(ctx, idx)
+}
+
+// Theme returns the account-level UI theme key ("" ⇒ the built-in default deck-dark).
+func (s *Store) Theme(ctx context.Context) (string, error) {
+	idx, err := s.loadIndex(ctx)
+	if err != nil {
+		return "", err
+	}
+	return idx.Theme, nil
+}
+
+// SetTheme persists the account-level UI theme in the RootIndex.
+func (s *Store) SetTheme(ctx context.Context, key string) error {
+	idx, err := s.loadIndex(ctx)
+	if err != nil {
+		return err
+	}
+	idx.Theme = key
+	return s.saveIndex(ctx, idx)
+}
+
+// SetProjectTheme sets a project's UI theme override in both the ph-manifest and its
+// RootIndex mirror ("" clears it → inherit the account default).
+func (s *Store) SetProjectTheme(ctx context.Context, projectID, key string) error {
+	idx, err := s.loadIndex(ctx)
+	if err != nil {
+		return err
+	}
+	i := indexOfProject(idx.Projects, projectID)
+	if i < 0 {
+		return fmt.Errorf("project %s not found", projectID)
+	}
+	folderID := idx.Projects[i].FolderID
+	entryID, manifest, err := s.projectManifest(ctx, folderID)
+	if err != nil {
+		return err
+	}
+	manifest.Theme = key
+	if err := s.updateEntry(ctx, entryID, &folderID, domain.KindManifest, manifest); err != nil {
+		return err
+	}
+	idx.Projects[i].Theme = key
+	return s.saveIndex(ctx, idx)
+}
+
 // SetProjectBackground updates a project's per-project background override in both
 // the ph-manifest and its RootIndex mirror (nil ⇒ inherit the account default).
 func (s *Store) SetProjectBackground(ctx context.Context, projectID string, bg *domain.Background) error {

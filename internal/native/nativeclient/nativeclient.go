@@ -24,6 +24,7 @@ package nativeclient
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -31,6 +32,7 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/Gerry3010/projecthub/internal/control"
 	"github.com/Gerry3010/projecthub/internal/core/domain"
 	"github.com/Gerry3010/projecthub/internal/pipepush"
 )
@@ -41,6 +43,9 @@ type Client struct {
 	base  string
 	token string
 	http  *http.Client
+	// longHTTP has no timeout, for the MCP control long-poll (which blocks up to ~25s
+	// server-side); the caller bounds it with a context instead.
+	longHTTP *http.Client
 }
 
 // New returns a client for the sidecar at base (e.g. http://127.0.0.1:54123) using
@@ -50,7 +55,7 @@ func New(base, token string) *Client {
 	if base == "" || token == "" {
 		return nil
 	}
-	return &Client{base: base, token: token, http: &http.Client{Timeout: 15 * time.Second}}
+	return &Client{base: base, token: token, http: &http.Client{Timeout: 15 * time.Second}, longHTTP: &http.Client{}}
 }
 
 // Available reports whether the sidecar API is usable (i.e. running under Electron).
@@ -97,6 +102,79 @@ func (c *Client) Transcript(ctx context.Context, cwd, sessionID string) ([]domai
 	return out, nil
 }
 
+// ListDir returns a single directory's entries (folders first) for the file-tree tile.
+func (c *Client) ListDir(ctx context.Context, path string) ([]domain.DirEntry, error) {
+	var out []domain.DirEntry
+	if err := c.get(ctx, "/native/dir?path="+url.QueryEscape(path), &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// MakeDir creates a directory (and missing parents) at an absolute path.
+func (c *Client) MakeDir(ctx context.Context, path string) error {
+	return c.post(ctx, "/native/mkdir", map[string]string{"path": path}, nil)
+}
+
+// Move renames/moves a file or folder (drag-and-drop in the file tree).
+func (c *Client) Move(ctx context.Context, src, dst string) error {
+	return c.post(ctx, "/native/move", map[string]string{"src": src, "dst": dst}, nil)
+}
+
+// WriteFile writes text content to an absolute path (creates or overwrites), used for
+// "new file".
+func (c *Client) WriteFile(ctx context.Context, path, content string) error {
+	return c.post(ctx, "/native/file", map[string]string{"path": path, "content": content}, nil)
+}
+
+// WriteFileBytes writes raw bytes to an absolute path (base64 on the wire), used for
+// syncing a vault blob to disk without corrupting binary data.
+func (c *Client) WriteFileBytes(ctx context.Context, path string, data []byte) error {
+	body := map[string]string{"path": path, "content_b64": base64.StdEncoding.EncodeToString(data)}
+	return c.post(ctx, "/native/file", body, nil)
+}
+
+// ControlNext long-polls the sidecar for the next renderer-bound MCP command. ok is
+// false when the poll returns empty (timeout) — the caller should simply poll again.
+func (c *Client) ControlNext(ctx context.Context) (cmd control.Command, ok bool, err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/native/control/next", nil)
+	if err != nil {
+		return control.Command{}, false, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	resp, err := c.longHTTP.Do(req)
+	if err != nil {
+		return control.Command{}, false, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusNoContent {
+		return control.Command{}, false, nil
+	}
+	if resp.StatusCode >= 300 {
+		return control.Command{}, false, fmt.Errorf("control/next: %s", resp.Status)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&cmd); err != nil {
+		return control.Command{}, false, err
+	}
+	return cmd, true, nil
+}
+
+// ControlResult posts a renderer's answer to an MCP command back to the sidecar.
+func (c *Client) ControlResult(ctx context.Context, res control.Result) error {
+	return c.post(ctx, "/native/control/result", res, nil)
+}
+
+// Tasks returns the task list a Claude Code session recorded (its live plan),
+// read from ~/.claude/tasks/<sessionID>/ by the sidecar.
+func (c *Client) Tasks(ctx context.Context, sessionID string) ([]domain.ClaudeTask, error) {
+	var out []domain.ClaudeTask
+	q := "/native/claude/tasks?session_id=" + url.QueryEscape(sessionID)
+	if err := c.get(ctx, q, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // Resume opens a PTY running `claude --resume <sessionID>` in cwd and returns the
 // pty id to attach a terminal WebSocket to.
 func (c *Client) Resume(ctx context.Context, cwd, sessionID string, cols, rows uint16) (string, error) {
@@ -108,6 +186,25 @@ func (c *Client) Resume(ctx context.Context, cwd, sessionID string, cols, rows u
 		return "", err
 	}
 	return out.PtyID, nil
+}
+
+// StartChat runs one headless Claude turn in cwd (print mode) and returns the session
+// id. The reply is not returned here — it streams into the normal session transcript,
+// which the embedded sidebar chat polls via Transcript. A fresh chat passes resume=false
+// with a client-minted sessionID (uuid); a follow-up passes resume=true to continue it.
+func (c *Client) StartChat(ctx context.Context, cwd, prompt, systemPrompt, sessionID string, resume bool) (retSessionID, effectiveCwd string, err error) {
+	body := map[string]any{
+		"cwd": cwd, "prompt": prompt, "system_prompt": systemPrompt,
+		"session_id": sessionID, "resume": resume,
+	}
+	var out struct {
+		SessionID string `json:"session_id"`
+		Cwd       string `json:"cwd"`
+	}
+	if err := c.post(ctx, "/native/claude/chat", body, &out); err != nil {
+		return "", "", err
+	}
+	return out.SessionID, out.Cwd, nil
 }
 
 // OpenIn opens a URL ("url") or filesystem path ("path") in the system default app.

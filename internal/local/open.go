@@ -16,25 +16,19 @@
 // Package local performs local-machine actions for the ProjectHub TUI companion —
 // opening URLs, files and directories via the desktop's default handler. These are
 // exactly the actions a sandboxed hosted web app cannot do.
+//
+// Platform-specific pieces (the default-opener command and the external-terminal
+// `claude --resume` launcher) live in open_<goos>.go. The desktop Electron app
+// resumes Claude in an embedded PTY (internal/ptyhost) and never uses the
+// external-terminal path; that path is only the headless TUI companion's fallback.
 package local
 
 import (
 	"fmt"
-	"os"
 	"os/exec"
 
 	"github.com/Gerry3010/projecthub/internal/core/domain"
 )
-
-// opener is the command used to open URLs/paths. xdg-open is the freedesktop
-// standard on Linux; var so tests can stub it.
-var opener = "xdg-open"
-
-// terminalCandidates are the terminal emulators tried (in order) to host an
-// interactive `claude --resume`, unless PROJECTHUB_TERMINAL overrides the choice.
-var terminalCandidates = []string{
-	"x-terminal-emulator", "kitty", "alacritty", "gnome-terminal", "konsole", "xterm",
-}
 
 // OpenURL opens a URL in the user's default browser (a new tab/window).
 func OpenURL(url string) error { return spawn(opener, url) }
@@ -42,6 +36,11 @@ func OpenURL(url string) error { return spawn(opener, url) }
 // OpenPath opens a file or directory in the user's default application / file
 // manager.
 func OpenPath(path string) error { return spawn(opener, path) }
+
+// OpenWith opens a target (path or URL) in a specific program, e.g. `code <path>`
+// for VS Code. Unlike OpenPath it bypasses the default handler. The program is run
+// detached with the target as its sole argument.
+func OpenWith(program, target string) error { return spawn(program, target) }
 
 // RestoreTabs reopens every tab's URL. It opens them in the current default
 // browser; precise multi-window restoration is left to the future browser
@@ -58,45 +57,30 @@ func RestoreTabs(tabs []domain.Tab) error {
 
 // ResumeCommand returns the command + args that resume a Claude Code session,
 // without spawning anything. The embedded terminal (Go PTY host) starts this
-// inside its own pane; the external-terminal path below wraps the same command.
+// inside its own pane; the external-terminal path wraps the same command.
 // Keeping it a pure function means both paths agree on exactly how a resume runs.
 func ResumeCommand(sessionID string) (name string, args []string) {
 	return "claude", []string{"--resume", sessionID}
 }
 
-// ResumeClaudeSession opens a new terminal window that resumes a Claude Code
-// session (`claude --resume <sessionID>`) in its original working directory.
-// Unlike a URL/path, `claude` is an interactive TUI, so it needs a terminal to
-// host it — chosen via PROJECTHUB_TERMINAL or the first available candidate.
-// This external-terminal path is used by the headless TUI companion; the Electron
-// app instead runs ResumeCommand inside an embedded PTY (internal/ptyhost).
-func ResumeClaudeSession(cwd, sessionID string) error {
-	term := pickTerminal()
-	if term == "" {
-		return fmt.Errorf("no terminal emulator found; set PROJECTHUB_TERMINAL to one (tried %v)", terminalCandidates)
+// ChatCommand returns the command + args for one headless Claude chat turn, used by
+// the embedded sidebar chat (no terminal). It runs in print mode (-p) and persists to
+// the normal session transcript (~/.claude/projects/<cwd>/<sessionId>.jsonl), so the
+// UI streams it simply by polling that transcript. A fresh chat passes resume=false
+// with a client-minted sessionID (--session-id); a follow-up passes resume=true to
+// continue the same session (--resume). Keeping it here alongside ResumeCommand makes
+// internal/local the single source of truth for how Claude is invoked.
+func ChatCommand(prompt, systemPrompt, sessionID string, resume bool) (name string, args []string) {
+	args = []string{"-p", prompt}
+	if systemPrompt != "" {
+		args = append(args, "--append-system-prompt", systemPrompt)
 	}
-	name, args := ResumeCommand(sessionID)
-	// The `-e` convention is honoured by every candidate terminal above.
-	cmd := exec.Command(term, append([]string{"-e", name}, args...)...)
-	cmd.Dir = cwd
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("launch %s: %w", term, err)
+	if resume {
+		args = append(args, "--resume", sessionID)
+	} else {
+		args = append(args, "--session-id", sessionID)
 	}
-	return nil
-}
-
-// pickTerminal returns PROJECTHUB_TERMINAL if set, else the first candidate found
-// on PATH, else "".
-func pickTerminal() string {
-	if t := os.Getenv("PROJECTHUB_TERMINAL"); t != "" {
-		return t
-	}
-	for _, c := range terminalCandidates {
-		if _, err := exec.LookPath(c); err == nil {
-			return c
-		}
-	}
-	return ""
+	return "claude", args
 }
 
 // spawn starts a detached process and returns without waiting.

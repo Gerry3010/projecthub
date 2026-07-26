@@ -18,7 +18,9 @@ package webui
 import (
 	"context"
 	"fmt"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/maxence-charriere/go-app/v10/pkg/app"
 
 	"github.com/Gerry3010/projecthub/internal/core/domain"
@@ -39,15 +41,28 @@ type claudeTile struct {
 	Cwd        string
 	OpenClaude func(ctx app.Context, cwd, prompt string)
 
+	// Embedded turns the tile into the global sidebar chat: submitting a prompt runs a
+	// headless Claude turn (Native.StartChat) and streams the reply in-place by polling
+	// the transcript — no terminal tile. SystemPrompt is the manager persona + project
+	// context baked in (see buildManagerSystemPrompt). The per-project Claude tile keeps
+	// Embedded=false and starts a terminal via OpenClaude.
+	Embedded     bool
+	SystemPrompt string
+
 	sessions []domain.CodeSession
 	loaded   bool
 	status   string
 
 	selected  string // selected session id ("" = none)
 	entries   []domain.TranscriptEntry
+	tasks     []domain.ClaudeTask // the selected session's live task list
 	loadingT  bool
 	tStatus   string
 	collapsed map[string]bool // thinking-block keys ("entryIdx-blockIdx") currently expanded
+
+	// embedded-chat run state
+	chatCwd string // effective cwd the sidecar used (for transcript polling)
+	sending bool   // a headless turn is in flight (poll loop running)
 
 	prompt string
 }
@@ -79,7 +94,7 @@ func (t *claudeTile) selectSession(sessionID string) app.EventHandler {
 		if t.Native == nil {
 			return
 		}
-		t.selected, t.entries, t.loadingT, t.tStatus = sessionID, nil, true, ""
+		t.selected, t.entries, t.tasks, t.loadingT, t.tStatus = sessionID, nil, nil, true, ""
 		native, cwd := t.Native, t.Cwd
 		ctx.Async(func() {
 			entries, err := native.Transcript(context.Background(), cwd, sessionID)
@@ -90,6 +105,19 @@ func (t *claudeTile) selectSession(sessionID string) app.EventHandler {
 					return
 				}
 				t.entries = entries
+			})
+		})
+		// Load the session's task list in parallel (best-effort: no tasks just hides
+		// the checklist section).
+		ctx.Async(func() {
+			tasks, err := native.Tasks(context.Background(), sessionID)
+			if err != nil {
+				return
+			}
+			ctx.Dispatch(func(ctx app.Context) {
+				if t.selected == sessionID {
+					t.tasks = tasks
+				}
 			})
 		})
 	}
@@ -107,16 +135,116 @@ func (t *claudeTile) setPrompt(ctx app.Context, e app.Event) {
 	t.prompt = ctx.JSSrc().Get("value").String()
 }
 
-// submitPrompt starts a real `claude "<prompt>"` session in a new Terminal tile
-// (see OpenClaude at construction, workspace.go) — Phase 1 delegates actually
-// talking to Claude to the existing PTY-backed terminal rather than a headless
-// invocation (Phase 2's job).
+// submitPrompt sends the prompt. In the embedded sidebar it runs a headless Claude
+// turn and streams the reply in-place (no terminal); in the per-project tile it opens
+// a real `claude "<prompt>"` terminal via OpenClaude.
 func (t *claudeTile) submitPrompt(ctx app.Context, _ app.Event) {
-	if t.prompt == "" || t.OpenClaude == nil {
+	if t.prompt == "" {
 		return
 	}
-	t.OpenClaude(ctx, t.Cwd, t.prompt)
+	if !t.Embedded {
+		if t.OpenClaude == nil {
+			return
+		}
+		t.OpenClaude(ctx, t.Cwd, t.prompt)
+		t.prompt = ""
+		return
+	}
+	if t.Native == nil || t.sending {
+		return
+	}
+	prompt := t.prompt
 	t.prompt = ""
+	// A selected session continues (resume); no selection starts a fresh chat with a
+	// client-minted session id.
+	resume := t.selected != ""
+	sid := t.selected
+	if !resume {
+		sid = uuid.NewString()
+		t.selected = sid
+		t.entries = nil
+		t.tasks = nil
+	}
+	t.sending, t.tStatus = true, ""
+	native, cwd, sp := t.Native, t.Cwd, t.SystemPrompt
+	ctx.Async(func() {
+		retSid, effCwd, err := native.StartChat(context.Background(), cwd, prompt, sp, sid, resume)
+		ctx.Dispatch(func(ctx app.Context) {
+			if err != nil {
+				t.sending, t.tStatus = false, err.Error()
+				return
+			}
+			t.chatCwd = effCwd
+			t.pollTranscript(ctx, retSid)
+		})
+	})
+}
+
+// pollTranscript streams a running headless turn into the view by re-reading the
+// session transcript (~1s) until it stops growing and an assistant reply is present
+// (or a safety cap is hit). Runs in one goroutine; each read dispatches an update.
+func (t *claudeTile) pollTranscript(ctx app.Context, sid string) {
+	native, cwd := t.Native, t.chatCwd
+	ctx.Async(func() {
+		var lastSig string
+		stable := 0
+		for i := 0; i < 180; i++ {
+			entries, err := native.Transcript(context.Background(), cwd, sid)
+			if err == nil {
+				entries := entries
+				ctx.Dispatch(func(ctx app.Context) {
+					if t.selected == sid {
+						t.entries = entries
+					}
+				})
+				sig := transcriptSig(entries)
+				if sig == lastSig {
+					stable++
+				} else {
+					stable, lastSig = 0, sig
+				}
+				// Done once the reply stopped changing for ~3s and an assistant message
+				// is present.
+				if stable >= 3 && lastEntryIsAssistant(entries) {
+					break
+				}
+			}
+			time.Sleep(time.Second)
+		}
+		ctx.Dispatch(func(ctx app.Context) {
+			if t.selected == sid {
+				t.sending = false
+			}
+		})
+	})
+}
+
+// newChat clears the active session so the next prompt starts a fresh embedded chat.
+func (t *claudeTile) newChat(ctx app.Context, _ app.Event) {
+	if t.sending {
+		return
+	}
+	t.selected, t.entries, t.tasks, t.tStatus = "", nil, nil, ""
+}
+
+// transcriptSig is a cheap change signature over a transcript (entry/block counts plus
+// the last block's text length) so polling can detect when a reply stops growing.
+func transcriptSig(entries []domain.TranscriptEntry) string {
+	if len(entries) == 0 {
+		return "0"
+	}
+	last := entries[len(entries)-1]
+	tail := 0
+	if len(last.Blocks) > 0 {
+		tail = len(last.Blocks[len(last.Blocks)-1].Text)
+	}
+	return fmt.Sprintf("%d/%d/%d", len(entries), len(last.Blocks), tail)
+}
+
+// lastEntryIsAssistant reports whether the transcript's final entry is an assistant
+// message (i.e. the reply to the just-sent prompt has landed).
+func lastEntryIsAssistant(entries []domain.TranscriptEntry) bool {
+	return len(entries) > 0 && entries[len(entries)-1].Role == "assistant"
 }
 
 func (t *claudeTile) Render() app.UI {
@@ -160,11 +288,16 @@ func (t *claudeTile) overview() app.UI {
 // detail renders the selected chat's transcript.
 func (t *claudeTile) detail() app.UI {
 	if t.selected == "" {
+		hint := "← einen Chat wählen."
+		if t.Embedded {
+			hint = "Frag den ProjectHub-Assistenten unten — er kennt deine Projekte und plant projektübergreifend."
+		}
 		return app.Div().Class("ph-cc-detail").Body(
-			app.P().Class("ph-muted").Text("← einen Chat wählen."),
+			app.P().Class("ph-muted").Text(hint),
 		)
 	}
 	return app.Div().Class("ph-cc-detail").Body(
+		t.taskList(),
 		app.If(t.tStatus != "", func() app.UI { return app.P().Class("ph-err").Text(t.tStatus) }),
 		app.If(t.loadingT, func() app.UI { return app.P().Class("ph-muted").Text("Lädt…") }),
 		app.Range(t.entries).Slice(func(i int) app.UI { return t.renderEntry(i, t.entries[i]) }),
@@ -172,6 +305,47 @@ func (t *claudeTile) detail() app.UI {
 			return app.P().Class("ph-muted").Text("Kein Transcript.")
 		}),
 	)
+}
+
+// taskList renders the selected session's live task plan as a checklist, with a
+// progress count. Hidden when the session recorded no tasks.
+func (t *claudeTile) taskList() app.UI {
+	if len(t.tasks) == 0 {
+		return app.Div()
+	}
+	done := 0
+	for _, tk := range t.tasks {
+		if tk.Status == "completed" {
+			done++
+		}
+	}
+	return app.Div().Class("ph-cc-tasks").Body(
+		app.Div().Class("ph-cc-tasks-head").Body(
+			icon("tasks", 14),
+			app.Span().Text(fmt.Sprintf("Aufgaben · %d/%d erledigt", done, len(t.tasks))),
+		),
+		app.Ul().Class("ph-list ph-cc-tasklist").Body(
+			app.Range(t.tasks).Slice(func(i int) app.UI {
+				tk := t.tasks[i]
+				return app.Li().Class("ph-cc-taskitem ph-cc-task-"+orText(tk.Status, "pending")).Body(
+					app.Span().Class("ph-cc-task-icon").Text(taskIcon(tk.Status)),
+					app.Span().Class("ph-cc-task-text").Text(orText(tk.Subject, tk.ActiveForm)),
+				)
+			}),
+		),
+	)
+}
+
+// taskIcon maps a task status to a glyph.
+func taskIcon(status string) string {
+	switch status {
+	case "completed":
+		return "✅"
+	case "in_progress":
+		return "🔄"
+	default:
+		return "⬜"
+	}
 }
 
 func (t *claudeTile) renderEntry(i int, e domain.TranscriptEntry) app.UI {
@@ -225,11 +399,35 @@ func (t *claudeTile) renderBlock(key string, b domain.TranscriptBlock) app.UI {
 	}
 }
 
-// inputBar is the sticky-footer prompt input; submitting starts a fresh Claude
-// terminal session with this prompt (Phase 1 — see submitPrompt).
+// inputBar is the sticky-footer prompt input. Embedded: send a headless turn (streams
+// in-place) with a "Neuer Chat" reset; per-project tile: start a Claude terminal.
 func (t *claudeTile) inputBar() app.UI {
-	return app.Div().Class("ph-cc-input").Body(
-		app.Textarea().Class("ph-island-input").Placeholder("Prompt…").Text(t.prompt).OnChange(t.setPrompt),
-		app.Button().Class("ph-btn").Text("▶ In Claude starten").Disabled(t.prompt == "").OnClick(t.submitPrompt),
+	if !t.Embedded {
+		return app.Div().Class("ph-cc-input").Body(
+			app.Textarea().Class("ph-island-input").Placeholder("Prompt…").Text(t.prompt).OnChange(t.setPrompt),
+			app.Button().Class("ph-btn ph-btn-icon").Disabled(t.prompt == "").OnClick(t.submitPrompt).Body(
+				icon("play", 15),
+				app.Span().Text("In Claude starten"),
+			),
+		)
+	}
+	sendLabel := "Senden"
+	if t.sending {
+		sendLabel = "Antwortet…"
+	}
+	return app.Div().Class("ph-cc-input ph-cc-input-embedded").Body(
+		app.Div().Class("ph-cc-input-actions").Body(
+			app.Button().Class("ph-link").Disabled(t.sending || (t.selected == "" && len(t.entries) == 0)).
+				Text("+ Neuer Chat").OnClick(t.newChat),
+			app.If(t.sending, func() app.UI {
+				return app.Span().Class("ph-muted ph-cc-running").Text("● Claude denkt nach…")
+			}),
+		),
+		app.Textarea().Class("ph-island-input").Placeholder("Frag den ProjectHub-Assistenten…").
+			Text(t.prompt).OnChange(t.setPrompt),
+		app.Button().Class("ph-btn ph-btn-icon").Disabled(t.prompt == "" || t.sending).OnClick(t.submitPrompt).Body(
+			icon("chat", 15),
+			app.Span().Text(sendLabel),
+		),
 	)
 }

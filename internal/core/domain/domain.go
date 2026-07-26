@@ -57,9 +57,10 @@ const (
 	KindPin      Kind = "ph-pin"
 	KindFile     Kind = "ph-file"
 
-	KindCodeSession  Kind = "ph-ccsession" // a Claude Code session reference
-	KindPipepushLink Kind = "ph-pipepush"  // link to a pipepush project (one per project)
-	KindLayout       Kind = "ph-layout"    // the tiling workspace layout (one per project)
+	KindCodeSession    Kind = "ph-ccsession" // a Claude Code session reference
+	KindPipepushLink   Kind = "ph-pipepush"  // link to a pipepush project (one per project)
+	KindLayout         Kind = "ph-layout"    // the tiling workspace layout (one per project)
+	KindPassbubbleLink Kind = "ph-pblink"    // reference to a Passbubble vault entry on the same server
 )
 
 // PassbubbleEntryType is the Passbubble `type` we use for all ProjectHub entries.
@@ -70,13 +71,24 @@ const PassbubbleEntryType = "note"
 // Theming. Colors are UI-only (never sensitive), but like every payload they still
 // live inside the encrypted RootIndex/manifest, so a chosen accent stays private.
 const (
-	ColorIndigo = "#6366f1"
-	ColorTeal   = "#14b8a6"
-	ColorViolet = "#a855f7"
+	ColorIndigo  = "#6366f1"
+	ColorBlue    = "#3b82f6"
+	ColorCyan    = "#06b6d4"
+	ColorTeal    = "#14b8a6"
+	ColorEmerald = "#10b981"
+	ColorAmber   = "#f59e0b"
+	ColorOrange  = "#f97316"
+	ColorRed     = "#ef4444"
+	ColorPink    = "#ec4899"
+	ColorViolet  = "#a855f7"
 )
 
-// DefaultPalette is the built-in preset set offered as one-click swatches.
-var DefaultPalette = []string{ColorIndigo, ColorTeal, ColorViolet}
+// DefaultPalette is the built-in preset set offered as one-click swatches — a curated
+// spectrum (cool → warm) that reads well on the graphite deck.
+var DefaultPalette = []string{
+	ColorIndigo, ColorBlue, ColorCyan, ColorTeal, ColorEmerald,
+	ColorAmber, ColorOrange, ColorRed, ColorPink, ColorViolet,
+}
 
 // DefaultAccent is the app accent used until the user picks their own.
 const DefaultAccent = ColorIndigo
@@ -113,6 +125,15 @@ type RootIndex struct {
 	// (a key like "brave"/"ddg"/"google"/"startpage"). Empty means the client
 	// default. Stored here so the choice syncs across devices via Passbubble.
 	SearchEngine string `json:"search_engine,omitempty"`
+	// HomeView is how the projects home is laid out: "grid" (default) or "list".
+	// Empty ⇒ grid. Synced across devices via the RootIndex.
+	HomeView string `json:"home_view,omitempty"`
+	// EditorTheme is the account-level default CodeMirror theme key (empty ⇒ built-in
+	// default). A project may override it (ProjectRef/Project.EditorTheme).
+	EditorTheme string `json:"editor_theme,omitempty"`
+	// Theme is the account-level UI theme key ("deck-dark" default, "liquid-glass", …).
+	// A project may override it (ProjectRef/Project.Theme).
+	Theme string `json:"theme,omitempty"`
 }
 
 // Background describes the app/project wallpaper and the glassmorphism of panels.
@@ -120,10 +141,16 @@ type RootIndex struct {
 type Background struct {
 	Type  string  `json:"type,omitempty"`  // "" (flat --bg) | "color" | "image"
 	Color string  `json:"color,omitempty"` // CSS hex for Type=="color"
-	Image string  `json:"image,omitempty"` // Type=="image": a ph-file entry id (E2E, synced) OR "file:<abs path>" (local)
+	Image string  `json:"image,omitempty"` // Type=="image": "preset:<file>" (bundled wallpaper) OR a ph-file entry id (E2E, synced) OR "file:<abs path>" (local)
 	Alpha float64 `json:"alpha,omitempty"` // panel translucency 0..1 (0 ⇒ opaque default)
 	Blur  int     `json:"blur,omitempty"`  // panel backdrop-blur in px (blurs the wallpaper behind tiles)
 	Dim   float64 `json:"dim,omitempty"`   // 0..1 dark overlay over the wallpaper for readability
+	// AppAlpha is the whole-window opacity of the deck + wallpaper layer (0..1; 0 ⇒
+	// the opaque default of 1). Below 1 the deck goes translucent so the desktop /
+	// other apps show through behind ProjectHub — only visible when the Electron
+	// window itself was created transparent (opt-in, see main.ts). Tiles keep their
+	// own Alpha, so content stays readable.
+	AppAlpha float64 `json:"app_alpha,omitempty"`
 }
 
 // ProjectRef is a project's entry in the RootIndex.
@@ -146,6 +173,12 @@ type ProjectRef struct {
 	// Background mirrors the manifest's per-project wallpaper/glass override; nil ⇒
 	// inherit the account default (RootIndex.Background).
 	Background *Background `json:"background,omitempty"`
+	// EditorTheme mirrors the manifest's per-project CodeMirror theme override; empty
+	// ⇒ inherit the account default (RootIndex.EditorTheme).
+	EditorTheme string `json:"editor_theme,omitempty"`
+	// Theme mirrors the manifest's per-project UI theme override; empty ⇒ inherit the
+	// account default (RootIndex.Theme).
+	Theme string `json:"theme,omitempty"`
 }
 
 // AccentColor returns the project's accent, falling back to a stable auto color
@@ -174,8 +207,10 @@ type Project struct {
 	Description string      `json:"description,omitempty"`
 	Slug        string      `json:"slug"`
 	LocalPath   string      `json:"local_path,omitempty"` // real cwd on this machine; see ProjectRef.Cwd
-	Color       string      `json:"color,omitempty"`      // accent (CSS hex); mirrored to ProjectRef.Color
-	Background  *Background `json:"background,omitempty"` // per-project wallpaper/glass; mirrored to ProjectRef.Background
+	Color       string      `json:"color,omitempty"`        // accent (CSS hex); mirrored to ProjectRef.Color
+	Background  *Background `json:"background,omitempty"`   // per-project wallpaper/glass; mirrored to ProjectRef.Background
+	EditorTheme string      `json:"editor_theme,omitempty"` // CodeMirror theme override; mirrored to ProjectRef.EditorTheme
+	Theme       string      `json:"theme,omitempty"`        // UI theme override; mirrored to ProjectRef.Theme
 	CreatedAt   time.Time   `json:"created_at"`
 }
 
@@ -194,6 +229,15 @@ type TodoItem struct {
 	Done      bool      `json:"done"`
 	CreatedAt time.Time `json:"created_at"`
 	DoneAt    time.Time `json:"done_at"`
+	// Order is the manual sort position (ascending). Legacy todos (created before
+	// reordering existed) default to 0, so ListTodos tie-breaks equal orders by
+	// CreatedAt — preserving the old newest-first behavior until a manual reorder
+	// assigns explicit positions.
+	Order int `json:"order,omitempty"`
+	// DueAt is the optional deadline; nil = none. RemindAt is the optional reminder
+	// time; nil = none or already fired (cleared after firing so it won't re-alert).
+	DueAt    *time.Time `json:"due_at,omitempty"`
+	RemindAt *time.Time `json:"remind_at,omitempty"`
 }
 
 // TabSet is the decrypted ph-tabset payload: a saved set of browser tabs/windows.
@@ -330,6 +374,40 @@ type TranscriptBlock struct {
 	ImageMIME string `json:"image_mime,omitempty"`
 }
 
+// DirEntry is one item in a local directory listing (the file-tree tile's lazy
+// per-folder read). Read live off disk by the sidecar (GET /native/dir); never
+// persisted.
+type DirEntry struct {
+	Name  string `json:"name"`
+	IsDir bool   `json:"is_dir"`
+	Size  int64  `json:"size"`
+}
+
+// ClaudeTask is one entry from a Claude Code session's task list (the TaskCreate/
+// TodoWrite plan), read live off disk from ~/.claude/tasks/<sessionId>/<id>.json.
+// Never persisted by ProjectHub — surfaced read-only so a session's current plan is
+// scannable in the Claude tile.
+type ClaudeTask struct {
+	ID          string `json:"id"`
+	Subject     string `json:"subject"`
+	Description string `json:"description,omitempty"`
+	ActiveForm  string `json:"active_form,omitempty"`
+	Status      string `json:"status"` // "pending" | "in_progress" | "completed"
+}
+
+// PassbubbleLink is the decrypted ph-pblink payload: a reference from a ProjectHub
+// project to one of the user's OTHER Passbubble vault entries on the same server
+// (a login, note, etc. created in the Passbubble app itself). Only the reference is
+// stored here — the linked entry's secret content is fetched and decrypted on demand
+// (Store.GetForeignEntry), never copied into ProjectHub's storage.
+type PassbubbleLink struct {
+	EntryID   string    `json:"entry_id"`   // the linked Passbubble entry's id
+	Title     string    `json:"title"`      // its name, mirrored for display without a fetch
+	EntryType string    `json:"entry_type"` // "login" | "note" | … (Passbubble entry type)
+	Folder    string    `json:"folder,omitempty"`
+	LinkedAt  time.Time `json:"linked_at"`
+}
+
 // PipepushLink is the decrypted ph-pipepush payload: it couples a ProjectHub
 // project to a pipepush project plus a webhook token. The token is secret but,
 // like every payload, encrypted at rest in Passbubble. At most one per project.
@@ -367,16 +445,19 @@ type FileBlob struct {
 type TileType string
 
 const (
-	TileTerminal TileType = "terminal"
-	TileBrowser  TileType = "browser"
-	TileMarkdown TileType = "markdown"
-	TileNotes    TileType = "notes"
-	TileTodo     TileType = "todo"
-	TileFiles    TileType = "files"
-	TileSessions TileType = "sessions"
-	TileTabs     TileType = "tabs"     // live open browser tabs, fed by the browser extension
-	TileClaude   TileType = "claude"   // Claude Code chat overview + transcript viewer/starter
-	TilePipepush TileType = "pipepush" // pipepush CI run overview + detail
+	TileTerminal   TileType = "terminal"
+	TileBrowser    TileType = "browser"
+	TileMarkdown   TileType = "markdown"
+	TileEditor     TileType = "editor"   // in-tile CodeMirror file editor (JS island)
+	TileFileTree   TileType = "filetree" // local (on-disk) file browser
+	TileNotes      TileType = "notes"
+	TileTodo       TileType = "todo"
+	TileFiles      TileType = "files"
+	TileSessions   TileType = "sessions"
+	TileTabs       TileType = "tabs"       // live open browser tabs, fed by the browser extension
+	TileClaude     TileType = "claude"     // Claude Code chat overview + transcript viewer/starter
+	TilePipepush   TileType = "pipepush"   // pipepush CI run overview + detail
+	TilePassbubble TileType = "passbubble" // links to the user's Passbubble vault entries
 )
 
 // Layout is the decrypted ph-layout payload: a project's Warp-style tiling workspace,
