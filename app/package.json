@@ -4,16 +4,22 @@
   "description": "ProjectHub desktop shell (Electron) — hosts the go-app WASM UI and supervises the Go sidecar.",
   "license": "AGPL-3.0-or-later",
   "author": "Gerald Hofbauer <info@geraldhofbauer.net>",
+  "homepage": "https://github.com/Gerry3010/projecthub",
   "main": "dist/main.js",
+  "//desktopName": "Read by electron-builder (linux.syncDesktopName) as the app_id / WM_CLASS so running windows group under the installed launcher.",
+  "desktopName": "projecthub-desktop.desktop",
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "build:shell": "esbuild renderer/shell/index.ts --bundle --minify --format=iife --outfile=../web/shell.js",
     "build:all": "npm run build && npm run build:shell",
     "dev": "npm run build:all && electron .",
     "start": "electron .",
+    "pack": "npm run build:all && electron-builder --linux",
+    "pack:dir": "npm run build:all && electron-builder --linux --dir",
     "e2e": "node scripts/drive.mjs",
     "e2e:remember": "node scripts/remember.mjs",
-    "e2e:server": "node scripts/server.mjs"
+    "e2e:server": "node scripts/server.mjs",
+    "e2e:multiwindow": "node scripts/multiwindow.mjs"
   },
   "dependencies": {
     "@codemirror/lang-css": "^6.3.1",
@@ -38,6 +44,7 @@
     "@types/markdown-it": "^14.1.2",
     "@types/node": "^22.10.0",
     "electron": "^33.2.0",
+    "electron-builder": "^26.15.3",
     "esbuild": "^0.24.0",
     "playwright": "^1.49.0",
     "typescript": "^5.7.0"

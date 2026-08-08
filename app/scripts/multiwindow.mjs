@@ -6,7 +6,7 @@
 //      project to a new window, which actually SHOWS the project (not the home view),
 //   3. the source window falls back to the project list.
 //
-// Run:  cd app && xvfb-run -a node scripts/windows.mjs
+// Run:  cd app && xvfb-run -a npm run e2e:multiwindow
 // Needs: local Passbubble on :8765 with the test account, a built app
 //        (npm run build:all) and built web assets (make build).
 //
