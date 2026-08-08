@@ -34,7 +34,11 @@ function sidecarCwd(): string {
 }
 
 let child: ChildProcess | null = null;
-let win: BrowserWindow | null = null;
+// One window per project — keyed by project id; "" is the home/launcher window. A
+// backgrounded project window keeps its Workspace mounted, so its terminals/Claude/
+// webviews stay alive while you work in another window (the caching requirement).
+const windows = new Map<string, BrowserWindow>();
+let handshake: Handshake | null = null; // latest sidecar handshake (for new windows)
 let restarts = 0;
 const MAX_RESTARTS = 5;
 let quitting = false;
@@ -84,9 +88,9 @@ function onSidecarExit(code: number | null): void {
   if (quitting) return;
   if (restarts >= MAX_RESTARTS) {
     console.error(`sidecar died ${restarts} times — giving up`);
-    win?.webContents.executeJavaScript(
-      `console.error('ProjectHub sidecar failed to stay up.')`
-    ).catch(() => {});
+    for (const w of windows.values()) {
+      w.webContents.executeJavaScript(`console.error('ProjectHub sidecar failed to stay up.')`).catch(() => {});
+    }
     return;
   }
   restarts++;
@@ -97,42 +101,71 @@ function onSidecarExit(code: number | null): void {
   }, backoff);
 }
 
-/** Point the window at the sidecar origin and (re)inject the native bridge args. */
-function loadRenderer(hs: Handshake): void {
+/** Create a window for a project ("" = home) on the current sidecar origin, injecting
+ *  the per-launch bridge args and loading the project via a "#/p/<id>" hash the WASM
+ *  Root reads to pin the window to that project. */
+function createWindow(projectId: string): BrowserWindow {
+  const hs = handshake!;
   const base = `http://127.0.0.1:${hs.port}`;
-  if (!win || win.isDestroyed()) {
-    // Opt-in window transparency (device-local, from the secure store). A transparent
-    // window must be created transparent — it can't be toggled at runtime — so the
-    // toggle in Settings writes the flag and relaunches. When on, the deck/wallpaper
-    // fade with --app-alpha so the desktop shows through behind ProjectHub.
-    const transparent = secureGet("window.transparent") === "1";
-    win = new BrowserWindow({
-      width: 1280,
-      height: 820,
-      transparent,
-      backgroundColor: transparent ? "#00000000" : "#0f1115",
-      webPreferences: {
-        preload: path.join(__dirname, "preload.js"),
-        contextIsolation: true,
-        nodeIntegration: false,
-        sandbox: true,
-        webviewTag: true, // browser-panel tiles use <webview>
-        additionalArguments: [`--ph-port=${hs.port}`, `--ph-token=${hs.token}`],
-      },
-    });
-    win.on("closed", () => (win = null));
-    // Surface renderer console + errors to the main-process stdout for debugging.
-    win.webContents.on("console-message", (_e, _lvl, message) => console.log("[renderer]", message));
-    win.webContents.on("render-process-gone", (_e, d) => console.error("[renderer gone]", d.reason));
-    // Browser-tile <webview> guests: inject the guest preload and force a hardened
-    // sandbox. Runs for every <webview> the renderer attaches.
-    win.webContents.on("will-attach-webview", (_e, webPreferences) => {
-      webPreferences.preload = path.join(__dirname, "webview-preload.js");
-      webPreferences.nodeIntegration = false;
-      webPreferences.contextIsolation = true;
-    });
+  // Opt-in window transparency (device-local, from the secure store). A transparent
+  // window must be created transparent — it can't be toggled at runtime — so the toggle
+  // in Settings writes the flag and relaunches. When on, the deck/wallpaper fade with
+  // --app-alpha so the desktop shows through behind ProjectHub.
+  const transparent = secureGet("window.transparent") === "1";
+  const w = new BrowserWindow({
+    width: 1280,
+    height: 820,
+    transparent,
+    backgroundColor: transparent ? "#00000000" : "#0f1115",
+    webPreferences: {
+      preload: path.join(__dirname, "preload.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webviewTag: true, // browser-panel tiles use <webview>
+      additionalArguments: [`--ph-port=${hs.port}`, `--ph-token=${hs.token}`],
+    },
+  });
+  windows.set(projectId, w);
+  w.on("closed", () => {
+    if (windows.get(projectId) === w) windows.delete(projectId);
+  });
+  // Surface renderer console + errors to the main-process stdout for debugging.
+  w.webContents.on("console-message", (_e, _lvl, message) => console.log("[renderer]", message));
+  w.webContents.on("render-process-gone", (_e, d) => console.error("[renderer gone]", d.reason));
+  // Browser-tile <webview> guests: inject the guest preload and force a hardened
+  // sandbox. Runs for every <webview> the renderer attaches.
+  w.webContents.on("will-attach-webview", (_e, webPreferences) => {
+    webPreferences.preload = path.join(__dirname, "webview-preload.js");
+    webPreferences.nodeIntegration = false;
+    webPreferences.contextIsolation = true;
+  });
+  w.loadURL(projectId ? `${base}#/p/${encodeURIComponent(projectId)}` : base);
+  return w;
+}
+
+/** Focus the project's window if it exists, else create it. */
+function openWindow(projectId: string): void {
+  const existing = windows.get(projectId);
+  if (existing && !existing.isDestroyed()) {
+    if (existing.isMinimized()) existing.restore();
+    existing.focus();
+    return;
   }
-  win.loadURL(base);
+  createWindow(projectId);
+}
+
+/** Called on sidecar (re)start. On first start opens the home window; on a restart the
+ *  port/token changed (existing windows point at a dead origin with stale bridge args),
+ *  so recreate every window fresh, preserving which project each showed. */
+function loadRenderer(hs: Handshake): void {
+  handshake = hs;
+  const keys = windows.size > 0 ? [...windows.keys()] : [""];
+  for (const w of windows.values()) {
+    if (!w.isDestroyed()) w.destroy();
+  }
+  windows.clear();
+  for (const id of keys) createWindow(id);
 }
 
 // ─── secure key/value store (origin-independent "stay signed in") ────────────
@@ -213,7 +246,7 @@ function registerSecureStore(): void {
 /** Window controls from the renderer. Currently: opt-in transparency, which needs a
  *  relaunch because a BrowserWindow's `transparent` can only be set at creation. */
 function registerWindowControls(): void {
-  ipcMain.on("ph-window", (e, req: { op: string; on?: boolean }) => {
+  ipcMain.on("ph-window", (e, req: { op: string; on?: boolean; id?: string }) => {
     switch (req.op) {
       case "get-transparent":
         e.returnValue = secureGet("window.transparent") === "1";
@@ -224,6 +257,16 @@ function registerWindowControls(): void {
         // Recreate the process so the window is (re)built with the new transparency.
         app.relaunch();
         app.exit(0);
+        return;
+      case "open-project":
+        // Open (or focus) a dedicated window for the project. "" reopens/focuses home.
+        openWindow(req.id ?? "");
+        e.returnValue = true;
+        return;
+      case "close":
+        // A pinned project window's "← Projekte" closes the window (back to home).
+        BrowserWindow.fromWebContents(e.sender)?.close();
+        e.returnValue = true;
         return;
       default:
         e.returnValue = null;
@@ -269,9 +312,8 @@ app.whenReady().then(async () => {
   }
 
   app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0 && child) {
-      // Sidecar still up; a fresh window needs its handshake — simplest is a restart.
-    }
+    // macOS dock re-activate with no windows: reopen the home window (sidecar's still up).
+    if (windows.size === 0 && handshake) openWindow("");
   });
 });
 

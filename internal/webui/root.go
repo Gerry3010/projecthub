@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"path"
 	"strconv"
+	"strings"
 
 	"github.com/maxence-charriere/go-app/v10/pkg/app"
 
@@ -63,6 +64,13 @@ type Root struct {
 	store    *store.Store
 	projects []domain.ProjectRef
 	selected *domain.ProjectRef // non-nil → showing a project's detail page
+
+	// Multi-window (desktop): pinned marks a window that is dedicated to one project
+	// (opened via a "#/p/<id>" hash) — its "← Projekte" closes the window rather than
+	// returning to the home view. pendingProjectID is that id, applied once the project
+	// list has loaded (works for both auto- and manual unlock).
+	pinned           bool
+	pendingProjectID string
 
 	// desktop (Electron) integration: nil in the hosted browser build
 	native      *nativeclient.Client
@@ -182,17 +190,58 @@ func (r *Root) chatSidebar() app.UI {
 	)
 }
 
-// openProject shows a project's detail page.
+// hashProjectID parses a "#/p/<id>" location hash into the project id ("" if none).
+func hashProjectID() string {
+	loc := app.Window().Get("location")
+	if !loc.Truthy() {
+		return ""
+	}
+	const pfx = "#/p/"
+	h := loc.Get("hash").String()
+	if strings.HasPrefix(h, pfx) {
+		return strings.TrimPrefix(h, pfx)
+	}
+	return ""
+}
+
+// openProjectWindow asks the Electron shell to open (or focus) a dedicated window for
+// the project. Returns false in the hosted browser build (no phWindow bridge), where the
+// caller falls back to switching the view in place.
+func openProjectWindow(id string) bool {
+	pw := app.Window().Get("phWindow")
+	if !pw.Truthy() || !pw.Get("openProject").Truthy() {
+		return false
+	}
+	pw.Call("openProject", id)
+	return true
+}
+
+// navProject opens a project: a dedicated window on the desktop, or in place otherwise.
+func (r *Root) navProject(ref domain.ProjectRef) {
+	if openProjectWindow(ref.ID) {
+		return // handled by opening/focusing that project's window
+	}
+	r.selected = &ref
+}
+
+// openProject shows a project (own window on desktop, in place in the hosted build).
 func (r *Root) openProject(ref domain.ProjectRef) func(ctx app.Context, e app.Event) {
 	return func(ctx app.Context, _ app.Event) {
-		r.selected = &ref
+		r.navProject(ref)
 	}
 }
 
-// closeProject returns to the project list, refreshing it.
+// closeProject returns to the project list, refreshing it. In a pinned (per-project)
+// desktop window it instead closes the window — home lives in its own window.
 func (r *Root) closeProject(ctx app.Context) {
+	if r.pinned {
+		if pw := app.Window().Get("phWindow"); pw.Truthy() && pw.Get("close").Truthy() {
+			pw.Call("close")
+			return
+		}
+	}
 	r.selected = nil
-	setDocTheme(r.theme)                   // back to the account theme (drop any project override)
+	setDocTheme(r.theme)                  // back to the account theme (drop any project override)
 	applyBackground(r.accountBg, r.bgURL) // back to the account wallpaper (drop project override)
 	r.busy, r.status = true, ""
 	ctx.Async(func() { r.reload(ctx, nil) })
@@ -205,6 +254,11 @@ func (r *Root) closeProject(ctx app.Context) {
 // is localStorage on the loopback desktop origin — the user's explicit, local-only
 // opt-in (a keychain-backed store is a later hardening step).
 func (r *Root) OnMount(ctx app.Context) {
+	// Multi-window: a per-project window loads "#/p/<id>". Remember it so the project
+	// is selected once the list loads; mark the window pinned so "back" closes it.
+	if id := hashProjectID(); id != "" {
+		r.pendingProjectID, r.pinned = id, true
+	}
 	if r.unlocked {
 		return
 	}
@@ -365,7 +419,7 @@ func (r *Root) doLogin(ctx app.Context) {
 			r.bgURL = bgURL
 			r.native = nc
 			r.suggestions = suggestions
-			setDocTheme(theme)                 // apply the account UI theme immediately
+			setDocTheme(theme)                // apply the account UI theme immediately
 			applyBackground(accountBg, bgURL) // apply the account wallpaper on the home view
 
 			// Persist per the "stay signed in" choice (local-only, this device).
@@ -705,6 +759,17 @@ func (r *Root) reload(ctx app.Context, mutate func()) {
 		// drop it from the offered list.
 		r.suggestions = filterAdded(r.suggestions, projects)
 		r.busy = false
+		// Multi-window: a pinned window selects its project once the list is available.
+		if r.pendingProjectID != "" {
+			for i := range projects {
+				if projects[i].ID == r.pendingProjectID {
+					ref := projects[i]
+					r.selected = &ref
+					break
+				}
+			}
+			r.pendingProjectID = ""
+		}
 	})
 	pushRoster(r.native, projects)
 }

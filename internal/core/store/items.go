@@ -150,6 +150,33 @@ func (s *Store) SetPipepushLink(ctx context.Context, projectFolderID string, l d
 	return s.putEntry(ctx, &projectFolderID, domain.KindPipepushLink, l)
 }
 
+// ─── redmine link ─────────────────────────────────────────────────────────────
+
+// GetRedmineLink returns the project's Redmine link, or nil if none is set.
+func (s *Store) GetRedmineLink(ctx context.Context, projectFolderID string) (*Item[domain.RedmineLink], error) {
+	links, err := listItems[domain.RedmineLink](ctx, s, projectFolderID, domain.KindRedmineLink)
+	if err != nil {
+		return nil, err
+	}
+	if len(links) == 0 {
+		return nil, nil
+	}
+	return &links[0], nil
+}
+
+// SetRedmineLink creates the project's Redmine link, or updates it in place if one
+// already exists. A project links to at most one Redmine instance.
+func (s *Store) SetRedmineLink(ctx context.Context, projectFolderID string, l domain.RedmineLink) (string, error) {
+	existing, err := s.GetRedmineLink(ctx, projectFolderID)
+	if err != nil {
+		return "", err
+	}
+	if existing != nil {
+		return existing.ID, s.updateEntry(ctx, existing.ID, &projectFolderID, domain.KindRedmineLink, l)
+	}
+	return s.putEntry(ctx, &projectFolderID, domain.KindRedmineLink, l)
+}
+
 // ─── workspace layout ─────────────────────────────────────────────────────────
 
 // GetLayout returns the project's tiling layout, or nil if none is saved yet.

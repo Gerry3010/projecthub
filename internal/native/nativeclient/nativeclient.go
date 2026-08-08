@@ -324,6 +324,31 @@ func (c *Client) getAuthed(ctx context.Context, path, jwt string, out any) error
 	return c.do(req, out)
 }
 
+// RedmineIssues fetches a Redmine project's open issues (newest-updated first) via the
+// sidecar's same-origin relay. apiKey travels in X-Redmine-Key (mapped upstream to
+// X-Redmine-API-Key); base is the Redmine root URL, project the project id/identifier
+// (optional filter).
+func (c *Client) RedmineIssues(ctx context.Context, base, apiKey, project string) ([]domain.RedmineIssue, error) {
+	q := "/native/redmine/issues?base=" + url.QueryEscape(base)
+	if project != "" {
+		q += "&project=" + url.QueryEscape(project)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+q, nil)
+	if err != nil {
+		return nil, err
+	}
+	if apiKey != "" {
+		req.Header.Set("X-Redmine-Key", apiKey)
+	}
+	var out struct {
+		Issues []domain.RedmineIssue `json:"issues"`
+	}
+	if err := c.do(req, &out); err != nil {
+		return nil, err
+	}
+	return out.Issues, nil
+}
+
 // FetchFile reads a local file's bytes + content type via the sidecar (used for local
 // background images, which the WASM UI turns into a data URL).
 func (c *Client) FetchFile(ctx context.Context, path string) (data []byte, contentType string, err error) {

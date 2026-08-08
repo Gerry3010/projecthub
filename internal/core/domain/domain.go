@@ -59,6 +59,7 @@ const (
 
 	KindCodeSession    Kind = "ph-ccsession" // a Claude Code session reference
 	KindPipepushLink   Kind = "ph-pipepush"  // link to a pipepush project (one per project)
+	KindRedmineLink    Kind = "ph-redmine"   // link to a Redmine instance (one per project)
 	KindLayout         Kind = "ph-layout"    // the tiling workspace layout (one per project)
 	KindPassbubbleLink Kind = "ph-pblink"    // reference to a Passbubble vault entry on the same server
 )
@@ -429,6 +430,38 @@ type PipepushLink struct {
 	LinkedAt  time.Time `json:"linked_at"`
 }
 
+// RedmineLink is the decrypted ph-redmine payload: it couples a ProjectHub project to
+// a Redmine instance. The API key is a credential but, like every payload here, is
+// encrypted at rest in Passbubble; ProjectHub only sends it to the sidecar's
+// same-origin Redmine relay (internal/nativeserver), which forwards it upstream as
+// X-Redmine-API-Key and never persists it. At most one per project.
+type RedmineLink struct {
+	BaseURL   string    `json:"base_url"`             // e.g. https://redmine.example.com
+	APIKey    string    `json:"api_key,omitempty"`   // Redmine REST API key (account setting)
+	ProjectID string    `json:"project_id,omitempty"` // optional: Redmine project id/identifier filter
+	Label     string    `json:"label,omitempty"`
+	LinkedAt  time.Time `json:"linked_at"`
+}
+
+// RedmineNamed is a nested {id,name} object as Redmine returns for status/priority/
+// tracker; ProjectHub only needs the display name.
+type RedmineNamed struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+}
+
+// RedmineIssue is a minimal projection of a Redmine issue from GET /issues.json — just
+// what the tile shows.
+type RedmineIssue struct {
+	ID        int          `json:"id"`
+	Subject   string       `json:"subject"`
+	Status    RedmineNamed `json:"status"`
+	Priority  RedmineNamed `json:"priority"`
+	Tracker   RedmineNamed `json:"tracker"`
+	DoneRatio int          `json:"done_ratio"`
+	UpdatedOn string       `json:"updated_on"`
+}
+
 // FileBlob is the decrypted ph-file payload: an uploaded file stored inline. Keep
 // to small files in v1 (base64 in JSON inflates ~33%); large files are future work
 // (chunking / external blob store).
@@ -458,6 +491,7 @@ const (
 	TileClaude     TileType = "claude"     // Claude Code chat overview + transcript viewer/starter
 	TilePipepush   TileType = "pipepush"   // pipepush CI run overview + detail
 	TilePassbubble TileType = "passbubble" // links to the user's Passbubble vault entries
+	TileRedmine    TileType = "redmine"    // Redmine issue overview (+ inline config)
 )
 
 // Layout is the decrypted ph-layout payload: a project's Warp-style tiling workspace,

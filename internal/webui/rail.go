@@ -50,8 +50,7 @@ func (r *Root) railView() app.UI {
 				return app.Button().Class(cls).Title(p.Title).
 					Style("--dot", p.AccentColor()).
 					OnClick(func(ctx app.Context, _ app.Event) {
-						ref := p
-						r.selected = &ref
+						r.navProject(p)
 					}).
 					Text(projectInitials(p.Title))
 			}),

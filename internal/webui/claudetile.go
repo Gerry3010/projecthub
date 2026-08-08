@@ -40,6 +40,9 @@ type claudeTile struct {
 	Native     *nativeclient.Client // nil in the hosted (non-Electron) build
 	Cwd        string
 	OpenClaude func(ctx app.Context, cwd, prompt string)
+	// OnActiveChat reports the currently open chat's title up to the tile chrome so the
+	// tile toolbar can show which Claude chat is active (nil for the embedded sidebar).
+	OnActiveChat func(title string)
 
 	// Embedded turns the tile into the global sidebar chat: submitting a prompt runs a
 	// headless Claude turn (Native.StartChat) and streams the reply in-place by polling
@@ -88,6 +91,31 @@ func (t *claudeTile) OnMount(ctx app.Context) {
 	})
 }
 
+// chatTitle returns a display title for a session id: its recorded title, else a short
+// id, else "Claude". Used to surface the active chat in the tile toolbar.
+func (t *claudeTile) chatTitle(sessionID string) string {
+	if sessionID == "" {
+		return "Claude"
+	}
+	for _, s := range t.sessions {
+		if s.SessionID == sessionID && s.Title != "" {
+			return s.Title
+		}
+	}
+	if len(sessionID) > 8 {
+		return "Chat " + sessionID[:8]
+	}
+	return "Chat " + sessionID
+}
+
+// notifyActiveChat pushes the active chat's title to the tile chrome (no-op in the
+// embedded sidebar, which has no tile toolbar).
+func (t *claudeTile) notifyActiveChat(sessionID string) {
+	if t.OnActiveChat != nil {
+		t.OnActiveChat(t.chatTitle(sessionID))
+	}
+}
+
 // selectSession loads a chat's full transcript on click.
 func (t *claudeTile) selectSession(sessionID string) app.EventHandler {
 	return func(ctx app.Context, _ app.Event) {
@@ -95,6 +123,7 @@ func (t *claudeTile) selectSession(sessionID string) app.EventHandler {
 			return
 		}
 		t.selected, t.entries, t.tasks, t.loadingT, t.tStatus = sessionID, nil, nil, true, ""
+		t.notifyActiveChat(sessionID)
 		native, cwd := t.Native, t.Cwd
 		ctx.Async(func() {
 			entries, err := native.Transcript(context.Background(), cwd, sessionID)
@@ -225,6 +254,7 @@ func (t *claudeTile) newChat(ctx app.Context, _ app.Event) {
 		return
 	}
 	t.selected, t.entries, t.tasks, t.tStatus = "", nil, nil, ""
+	t.notifyActiveChat("")
 }
 
 // transcriptSig is a cheap change signature over a transcript (entry/block counts plus

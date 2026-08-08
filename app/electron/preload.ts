@@ -48,6 +48,14 @@ contextBridge.exposeInMainWorld("phWindow", {
   setTransparent: (on: boolean): void => {
     ipcRenderer.sendSync("ph-window", { op: "set-transparent", on });
   },
+  // Multi-window: open (or focus) a dedicated window per project; "" targets home.
+  openProject: (id: string): void => {
+    ipcRenderer.send("ph-window", { op: "open-project", id });
+  },
+  // Close the calling window (a pinned project window's "back to projects").
+  close: (): void => {
+    ipcRenderer.send("ph-window", { op: "close" });
+  },
 });
 
 // phNotify shows a native OS desktop notification (Electron Notification API in the

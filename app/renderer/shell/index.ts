@@ -117,7 +117,7 @@ function createIsland(paneID: string, type: string, params: Record<string, strin
   el.dataset.pane = paneID;
   switch (type) {
     case "terminal":
-      return mountTerminal(el, params);
+      return mountTerminal(el, params, paneID);
     case "markdown":
       return mountMarkdown(el, params);
     case "browser":
@@ -132,7 +132,32 @@ function createIsland(paneID: string, type: string, params: Record<string, strin
 
 // ─── terminal ─────────────────────────────────────────────────────────────────
 
-function mountTerminal(el: HTMLElement, params: Record<string, string>): Island {
+// Terminal word-navigation modifier (device-local, via phSecure). Picks which modifier
+// + Arrow/Backspace/Delete triggers word-jump / word-delete in the terminal. Default
+// "alt" mirrors xterm's historic behavior; Settings → Terminal drives it live via
+// applyTerminalWordMod (no re-mount — every open terminal reads this at key time).
+type TermWordMod = "alt" | "ctrl" | "meta";
+let termWordMod: TermWordMod = "alt";
+try {
+  const saved = (window as any).phSecure?.get?.("ph.term.wordmod");
+  if (saved === "alt" || saved === "ctrl" || saved === "meta") termWordMod = saved;
+} catch {
+  /* no phSecure bridge (hosted browser build) */
+}
+
+// applyTerminalWordMod is called BY go-app (Settings picker) to switch the modifier and
+// persist it device-local. Runtime var is read live by every terminal's key handler.
+function applyTerminalWordMod(key: string): void {
+  if (key !== "alt" && key !== "ctrl" && key !== "meta") return;
+  termWordMod = key;
+  try {
+    (window as any).phSecure?.set?.("ph.term.wordmod", key);
+  } catch {
+    /* no phSecure bridge */
+  }
+}
+
+function mountTerminal(el: HTMLElement, params: Record<string, string>, paneID = ""): Island {
   const nat = phNative();
   const term = new Terminal({
     // "PH Nerd Symbols" is a bundled per-glyph fallback (theme.css) so Starship/
@@ -157,7 +182,72 @@ function mountTerminal(el: HTMLElement, params: Record<string, string>): Island 
 
   let ws: WebSocket | null = null;
   let closed = false;
+  let ptyId = ""; // function-scoped so cleanup can DELETE (kill) the session on tile close
   const ro = new ResizeObserver(() => doFit());
+
+  // Word-navigation: for the configured modifier + Arrow/Backspace/Delete, send the
+  // classic readline ESC sequences so word-jump/-delete works predictably no matter
+  // which modifier the user picked (Settings → Terminal). Everything else falls through
+  // to xterm's default handling.
+  term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
+    if (e.type !== "keydown") return true;
+    const mod = termWordMod === "alt" ? e.altKey : termWordMod === "ctrl" ? e.ctrlKey : e.metaKey;
+    if (!mod) return true;
+    let seq = "";
+    switch (e.key) {
+      case "ArrowLeft":
+        seq = "\x1bb"; // backward-word
+        break;
+      case "ArrowRight":
+        seq = "\x1bf"; // forward-word
+        break;
+      case "Backspace":
+        seq = "\x1b\x7f"; // backward-kill-word
+        break;
+      case "Delete":
+        seq = "\x1bd"; // kill-word (forward)
+        break;
+      default:
+        return true;
+    }
+    e.preventDefault();
+    if (ws?.readyState === WebSocket.OPEN) ws.send(frame(OP_DATA, new TextEncoder().encode(seq)));
+    return false; // consumed — don't let xterm process it too
+  });
+
+  // Notifications: terminal bell + OSC 9 / OSC 777, plus a PTY-idle "task done" hint
+  // for Claude sessions. All route through emitNotify (in-app toast + OS desktop).
+  const notifyLabel = params.cmd === "claude" || params.session_id ? "Claude" : "Terminal";
+  const isClaude = params.cmd === "claude" || !!params.session_id;
+  let lastBell = 0;
+  term.onBell(() => {
+    const now = Date.now();
+    if (now - lastBell > 3000) {
+      lastBell = now;
+      emitNotify(notifyLabel, "Glocke");
+    }
+  });
+  term.parser.registerOscHandler(9, (data: string) => {
+    emitNotify(notifyLabel, data); // iTerm-style: ESC ] 9 ; <message> BEL
+    return true;
+  });
+  term.parser.registerOscHandler(777, (data: string) => {
+    const p = data.split(";"); // ESC ] 777 ; notify ; <title> ; <body> BEL
+    if (p[0] === "notify") emitNotify(p[1] || notifyLabel, p[2] || "");
+    return true;
+  });
+  // PTY-idle heuristic: once a burst of Claude output goes quiet for a few seconds,
+  // surface "Antwort fertig" once (re-arms on the next output).
+  let lastData = 0;
+  let idlePending = false;
+  const idleTimer = isClaude
+    ? setInterval(() => {
+        if (idlePending && lastData && Date.now() - lastData >= 4000) {
+          idlePending = false;
+          emitNotify("Claude", "Antwort fertig");
+        }
+      }, 1000)
+    : null;
 
   // xterm must be opened while the element is in the DOM and has a size, else it
   // renders blank — so all of this runs from onAttached, not at create time.
@@ -173,19 +263,39 @@ function mountTerminal(el: HTMLElement, params: Record<string, string>): Island 
       const cols = term.cols || 80;
       const rows = term.rows || 24;
       const cwd = params.cwd || "";
-      let ptyId = "";
       try {
-        if (params.session_id) {
-          ptyId = await postJSON(nat, "/native/claude/resume", { cwd, session_id: params.session_id, cols, rows }).then(
-            (r) => r.pty_id,
-          );
-        } else {
-          // A "prompt" param (set by the Claude tile's starter) is forwarded as the
-          // sole CLI arg so `claude "<prompt>"` opens straight into that session.
-          const args = params.cmd === "claude" && params.prompt ? [params.prompt] : [];
-          ptyId = await postJSON(nat, "/native/pty", { cwd, cmd: params.cmd || "", args, cols, rows }).then(
-            (r) => r.pty_id,
-          );
+        // Reattach to a still-running session after a renderer reload, if its PTY is
+        // alive (the sidecar replays the scrollback on connect).
+        if (params.pty_id) {
+          const alive = await fetch(nat.base + "/native/pty/" + encodeURIComponent(params.pty_id), {
+            headers: { Authorization: "Bearer " + nat.token },
+          })
+            .then((r) => r.status === 204)
+            .catch(() => false);
+          if (alive) ptyId = params.pty_id;
+        }
+        if (!ptyId) {
+          if (params.session_id) {
+            ptyId = await postJSON(nat, "/native/claude/resume", { cwd, session_id: params.session_id, cols, rows }).then(
+              (r) => r.pty_id,
+            );
+          } else {
+            // A "prompt" param (set by the Claude tile's starter) is forwarded as the
+            // sole CLI arg so `claude "<prompt>"` opens straight into that session.
+            const args = params.cmd === "claude" && params.prompt ? [params.prompt] : [];
+            ptyId = await postJSON(nat, "/native/pty", { cwd, cmd: params.cmd || "", args, cols, rows }).then(
+              (r) => r.pty_id,
+            );
+          }
+          // Persist the new id so a later reload can reattach to this session.
+          if (ptyId && ptyId !== params.pty_id) {
+            params.pty_id = ptyId;
+            try {
+              (window as any).phPtyState?.(paneID, ptyId);
+            } catch {
+              /* no go-app bridge */
+            }
+          }
         }
       } catch (e) {
         term.writeln(`\x1b[31mTerminal-Start fehlgeschlagen: ${e}\x1b[0m`);
@@ -195,7 +305,13 @@ function mountTerminal(el: HTMLElement, params: Record<string, string>): Island 
       const wsURL = nat.base.replace(/^http/, "ws") + `/native/pty/${ptyId}/ws`;
       ws = new WebSocket(wsURL, nat.wsBearer);
       ws.binaryType = "arraybuffer";
-      ws.onmessage = (ev) => term.write(new Uint8Array(ev.data as ArrayBuffer));
+      ws.onmessage = (ev) => {
+        term.write(new Uint8Array(ev.data as ArrayBuffer));
+        if (isClaude) {
+          lastData = Date.now();
+          idlePending = true;
+        }
+      };
       ws.onclose = () => {
         if (!closed) term.writeln("\r\n\x1b[90m[Sitzung beendet]\x1b[0m");
       };
@@ -223,9 +339,19 @@ function mountTerminal(el: HTMLElement, params: Record<string, string>): Island 
     onAttached,
     cleanup: () => {
       closed = true;
+      if (idleTimer) clearInterval(idleTimer);
       ro.disconnect();
       ws?.close();
       term.dispose();
+      // The tile was intentionally destroyed (closed, or its workspace unmounted) → kill
+      // the PTY. A renderer reload does NOT run cleanup, so that path keeps the session
+      // alive for reattach-by-id instead.
+      if (ptyId && nat) {
+        fetch(nat.base + "/native/pty/" + encodeURIComponent(ptyId), {
+          method: "DELETE",
+          headers: { Authorization: "Bearer " + nat.token },
+        }).catch(() => {});
+      }
     },
   };
 }
@@ -1230,6 +1356,75 @@ function initDropHint(): void {
   document.addEventListener("dragend", hide);
 }
 
+// ─── notifications ────────────────────────────────────────────────────────────────
+// Unified notify path: an in-app toast overlay plus a native OS desktop notification
+// (phNotify bridge). Fed by terminal bells/OSC sequences and the PTY-idle heuristic
+// (mountTerminal), plus the sidecar's /native/notify queue (e.g. chattr messages).
+
+let toastHost: HTMLElement | null = null;
+
+function ensureToastHost(): HTMLElement {
+  if (!toastHost) {
+    toastHost = document.createElement("div");
+    toastHost.className = "ph-toasts";
+    document.body.appendChild(toastHost);
+  }
+  return toastHost;
+}
+
+function emitNotify(title: string, body: string): void {
+  try {
+    const host = ensureToastHost();
+    const el = document.createElement("div");
+    el.className = "ph-toast";
+    const h = document.createElement("div");
+    h.className = "ph-toast-title";
+    h.textContent = title;
+    el.appendChild(h);
+    if (body) {
+      const b = document.createElement("div");
+      b.className = "ph-toast-body";
+      b.textContent = body;
+      el.appendChild(b);
+    }
+    el.addEventListener("click", () => el.remove());
+    host.appendChild(el);
+    setTimeout(() => {
+      el.classList.add("ph-toast-out");
+      setTimeout(() => el.remove(), 300);
+    }, 6000);
+  } catch {
+    /* document.body not ready yet */
+  }
+  try {
+    (window as any).phNotify?.(title, body);
+  } catch {
+    /* no bridge (hosted build) */
+  }
+}
+// Exposed so go-app can raise a toast+desktop notification too.
+(window as any).phEmitNotify = emitNotify;
+
+// notifyLoop drains the sidecar's /native/notify queue (long-poll). Reconnects at once
+// on 204/timeout; backs off on hard errors (sidecar restarting).
+async function notifyLoop(): Promise<void> {
+  const nat = phNative();
+  if (!nat) return; // hosted build: no sidecar
+  for (;;) {
+    try {
+      const resp = await fetch(nat.base + "/native/notify/next", {
+        headers: { Authorization: "Bearer " + nat.token },
+      });
+      if (resp.status === 200) {
+        const m = await resp.json();
+        if (m && m.title) emitNotify(m.title, m.body || "");
+      }
+    } catch {
+      await new Promise((r) => setTimeout(r, 5000));
+    }
+  }
+}
+
 // ─── plumbing ───────────────────────────────────────────────────────────────────
 
 async function postJSON(nat: PhNative, path: string, body: unknown): Promise<any> {
@@ -1253,13 +1448,21 @@ function safeParse(s: string): Record<string, string> {
 // phShell is pure functions — expose immediately (go-app calls it long after load).
 // Browser navigation now lives entirely in the tile's own chrome (mountBrowser), so
 // the old top-level navigate() is gone; go-app only attaches/destroys islands.
-(window as any).phShell = { attachIsland, destroyIsland, parkIslands, applySearchEngine, applyEditorTheme };
+(window as any).phShell = {
+  attachIsland,
+  destroyIsland,
+  parkIslands,
+  applySearchEngine,
+  applyEditorTheme,
+  applyTerminalWordMod,
+};
 
 // The DOM-touching init (drop-hint appends to <body>) must wait: this script runs in
 // <head>, where document.body is still null.
 function boot(): void {
   initDividerResize();
   initDropHint();
+  void notifyLoop(); // drain sidecar notifications (chattr etc.) into toasts + desktop
 }
 if (document.readyState === "loading") {
   document.addEventListener("DOMContentLoaded", boot);

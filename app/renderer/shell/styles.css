@@ -238,6 +238,42 @@
   font-size: 0.78rem; white-space: pre-wrap; word-break: break-word; overflow: auto; max-height: 20rem;
 }
 
+/* notifications (in-app toasts) */
+.ph-toasts {
+  position: fixed; top: 0.8rem; right: 0.8rem; z-index: 9999;
+  display: flex; flex-direction: column; gap: 0.5rem;
+  max-width: min(360px, calc(100vw - 1.6rem)); pointer-events: none;
+}
+.ph-toast {
+  pointer-events: auto; cursor: pointer;
+  background: color-mix(in srgb, var(--ph-panel-2, #1b1e28) 96%, transparent);
+  border: 1px solid var(--ph-line, var(--border)); border-radius: var(--radius-md, 12px);
+  padding: 0.6rem 0.75rem; color: var(--fg);
+  box-shadow: var(--shadow-pop, 0 8px 30px rgba(0,0,0,0.35)), inset 0 1px 0 var(--ph-rim, transparent);
+  -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+  animation: ph-toast-in 0.22s ease-out;
+}
+.ph-toast-title { font-weight: 600; font-size: 0.86rem; }
+.ph-toast-body { margin-top: 0.15rem; font-size: 0.8rem; color: var(--muted); word-break: break-word; }
+.ph-toast-out { opacity: 0; transform: translateX(12px); transition: opacity 0.3s, transform 0.3s; }
+@keyframes ph-toast-in { from { opacity: 0; transform: translateX(12px); } to { opacity: 1; transform: none; } }
+
+/* redmine tile */
+.ph-redmine-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 0.5rem;
+  margin-bottom: 0.4rem; font-size: 0.8rem;
+}
+.ph-redmine-issue { cursor: pointer; gap: 0.5rem; }
+.ph-redmine-issue:hover { border-color: var(--accent, #6d8bff); }
+.ph-redmine-id { flex: none; font-variant-numeric: tabular-nums; color: var(--muted); font-size: 0.8rem; }
+.ph-redmine-config { display: flex; flex-direction: column; gap: 0.5rem; }
+.ph-redmine-config .ph-input {
+  width: 100%; padding: 0.5rem 0.6rem; border-radius: 8px;
+  border: 1px solid var(--border); background: color-mix(in srgb, var(--fg) 5%, transparent);
+  color: var(--fg); font-size: 0.85rem;
+}
+.ph-redmine-actions { display: flex; align-items: center; gap: 0.6rem; }
+
 /* appearance / background panel */
 .ph-appr {
   position: absolute; top: 3rem; right: 0.6rem; z-index: 30;

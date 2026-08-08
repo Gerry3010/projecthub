@@ -97,6 +97,7 @@ func (r *Root) settingsView() app.UI {
 	tabs := []struct{ Key, Label string }{
 		{"appearance", "Erscheinungsbild"},
 		{"editor", "Editor"},
+		{"terminal", "Terminal"},
 		{"account", "Konto"},
 		{"about", "Über"},
 	}
@@ -161,6 +162,8 @@ func (r *Root) settingsPane(tab string) app.UI {
 	switch tab {
 	case "editor":
 		return r.settingsEditor()
+	case "terminal":
+		return r.settingsTerminal()
 	case "account":
 		return r.settingsAccount()
 	case "about":
@@ -353,6 +356,59 @@ func (r *Root) chooseEditorTheme(ctx app.Context, key string) {
 			ctx.Dispatch(func(ctx app.Context) { r.status = "Editor-Theme speichern fehlgeschlagen: " + err.Error() })
 		}
 	})
+}
+
+// ─── Terminal tab ─────────────────────────────────────────────────────────────
+
+// termWordModOptions mirrors the TermWordMod union in the shell (index.ts).
+var termWordModOptions = []struct{ Key, Label string }{
+	{"alt", "Alt / Option"},
+	{"ctrl", "Strg / Ctrl"},
+	{"meta", "Win / Cmd (Meta)"},
+}
+
+// terminalWordMod reads the device-local terminal word-nav modifier from the phSecure
+// bridge (alt|ctrl|meta). Default "alt". available=false in the hosted browser build.
+func terminalWordMod() (mod string, available bool) {
+	ps := app.Window().Get("phSecure")
+	if !ps.Truthy() {
+		return "alt", false
+	}
+	v := ps.Call("get", "ph.term.wordmod").String()
+	if v != "alt" && v != "ctrl" && v != "meta" {
+		v = "alt"
+	}
+	return v, true
+}
+
+// setTerminalWordMod applies the modifier live to every open terminal via the shell,
+// which also persists it device-local (phSecure). No-op without the bridge.
+func setTerminalWordMod(mod string) {
+	if shell := app.Window().Get("phShell"); shell.Truthy() {
+		shell.Call("applyTerminalWordMod", mod)
+	}
+}
+
+func (r *Root) settingsTerminal() app.UI {
+	cur, ok := terminalWordMod()
+	if !ok {
+		return app.Div().Body(
+			app.P().Class("ph-eyebrow").Text("Terminal"),
+			app.P().Class("ph-settings-note").Text("Terminal-Einstellungen sind nur im Desktop-Build verfügbar."),
+		)
+	}
+	return app.Div().Body(
+		app.P().Class("ph-eyebrow").Text("Wort-Navigation"),
+		app.Select().Class("ph-select").
+			OnChange(func(ctx app.Context, e app.Event) { setTerminalWordMod(ctx.JSSrc().Get("value").String()) }).
+			Body(
+				app.Range(termWordModOptions).Slice(func(i int) app.UI {
+					o := termWordModOptions[i]
+					return app.Option().Value(o.Key).Text(o.Label).Selected(o.Key == cur)
+				}),
+			),
+		app.P().Class("ph-settings-note").Text("Diese Taste springt/löscht im Terminal wortweise: Taste+←/→ springt ein Wort, Taste+Backspace/Entf löscht ein Wort. Gilt nur auf diesem Gerät."),
+	)
 }
 
 // ─── Konto tab ──────────────────────────────────────────────────────────────────

@@ -63,12 +63,24 @@ type Server struct {
 	// the endpoint reports empty / "not configurable".
 	getServer func() string
 	setServer func(string) error
+
+	// notify is the desktop/in-app notification queue: POST /notify enqueues, the
+	// renderer drains it via the /notify/next long-poll. Buffered + drop-oldest so a
+	// producer (e.g. the chattr bridge) never blocks.
+	notify chan notifyMsg
+}
+
+// notifyMsg is one queued desktop/in-app notification.
+type notifyMsg struct {
+	Title  string `json:"title"`
+	Body   string `json:"body,omitempty"`
+	Source string `json:"source,omitempty"` // e.g. "chattr", "terminal" (informational)
 }
 
 // New returns a native API server authenticated by token, using pty for terminals
 // and tabs for the live browser-tab state (fed by the native-messaging host).
 func New(token string, pty *ptyhost.Host, tabs *tabstate.Store) *Server {
-	return &Server{token: token, pty: pty, tabs: tabs, hub: control.New()}
+	return &Server{token: token, pty: pty, tabs: tabs, hub: control.New(), notify: make(chan notifyMsg, 64)}
 }
 
 // SetServerHooks wires the /server endpoint to the live Passbubble upstream: get
@@ -89,6 +101,7 @@ func (s *Server) Handler() http.Handler {
 	r.Post("/claude/chat", s.claudeChat)
 	r.Post("/pty", s.ptyOpen)
 	r.Get("/pty/{id}/ws", s.ptyWS)
+	r.Get("/pty/{id}", s.ptyAlive)
 	r.Delete("/pty/{id}", s.ptyClose)
 	r.Post("/openin", s.openIn)
 	r.Get("/server", s.serverGet)
@@ -108,6 +121,9 @@ func (s *Server) Handler() http.Handler {
 	r.Post("/pipepush/login", s.pipepushLogin)
 	r.Get("/pipepush/pipelines", s.pipepushPipelines)
 	r.Get("/pipepush/runs", s.pipepushRuns)
+	r.Get("/redmine/issues", s.redmineIssues)
+	r.Post("/notify", s.notifyPost)
+	r.Get("/notify/next", s.notifyNext)
 	// MCP: cmd/phmcp bridges Claude Code's MCP calls to these; renderer tools are
 	// forwarded to the WASM UI over the control channel below.
 	r.Get("/mcp/tools", s.mcpTools)
@@ -317,6 +333,16 @@ func (s *Server) ptyWS(w http.ResponseWriter, r *http.Request) {
 func (s *Server) ptyClose(w http.ResponseWriter, r *http.Request) {
 	s.pty.Close(chi.URLParam(r, "id"))
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// ptyAlive reports whether a PTY session is still live (204) or gone (404) — the
+// renderer checks this after a reload to decide reattach vs. start-fresh.
+func (s *Server) ptyAlive(w http.ResponseWriter, r *http.Request) {
+	if s.pty.Has(chi.URLParam(r, "id")) {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	http.Error(w, "unknown pty session", http.StatusNotFound)
 }
 
 // ─── Open-In ─────────────────────────────────────────────────────────────────
@@ -595,10 +621,103 @@ func (s *Server) pipepushRelay(w http.ResponseWriter, r *http.Request, method, t
 }
 
 // validPipepushBase requires an absolute http(s) URL, guarding the relay
-// against being pointed at a non-HTTP scheme.
+// against being pointed at a non-HTTP scheme. (Generic http(s) validator; the
+// Redmine relay reuses it.)
 func validPipepushBase(base string) bool {
 	u, err := url.Parse(base)
 	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
+}
+
+// ─── redmine proxy ────────────────────────────────────────────────────────────
+//
+// Like pipepush, a Redmine server rarely sends CORS headers for the WASM origin,
+// and its API key is a credential we don't want exposed to arbitrary JS. So the
+// WASM UI reaches Redmine only through this thin same-origin relay: it forwards
+// the caller's X-Redmine-Key as the upstream X-Redmine-API-Key header and copies
+// the response straight back. The key is never persisted here.
+
+// redmineDefaultLimit caps how many issues are fetched for the overview.
+const redmineDefaultLimit = "50"
+
+// redmineIssues relays GET {base}/issues.json for the project named by ?project=
+// (optional), authorized by the caller's X-Redmine-Key header.
+func (s *Server) redmineIssues(w http.ResponseWriter, r *http.Request) {
+	base := r.URL.Query().Get("base")
+	if !validPipepushBase(base) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	target := strings.TrimRight(base, "/") + "/issues.json?status_id=open&sort=updated_on:desc&limit=" + redmineDefaultLimit
+	if project := r.URL.Query().Get("project"); project != "" {
+		target += "&project_id=" + url.QueryEscape(project)
+	}
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, target, nil)
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+	req.Header.Set("Accept", "application/json")
+	if key := r.Header.Get("X-Redmine-Key"); key != "" {
+		req.Header.Set("X-Redmine-API-Key", key)
+	}
+	client := &http.Client{Timeout: pipepushHTTPTimeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if ct := resp.Header.Get("Content-Type"); ct != "" {
+		w.Header().Set("Content-Type", ct)
+	}
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
+}
+
+// ─── notifications ────────────────────────────────────────────────────────────
+//
+// A tiny fan-in queue for desktop/in-app notifications. Producers POST /notify
+// (the renderer's own terminal triggers call the JS emit path directly, but an
+// external bridge — e.g. the chattr realtime listener — POSTs here); the renderer
+// drains them with the /notify/next long-poll and shows a toast + OS notification.
+
+// maxNotifyBody caps the notify POST body (title+body are short).
+const maxNotifyBody = 8 << 10 // 8 KiB
+
+// notifyPost enqueues a notification. Non-blocking: if the buffer is full the oldest
+// entry is dropped so a producer never blocks.
+func (s *Server) notifyPost(w http.ResponseWriter, r *http.Request) {
+	var m notifyMsg
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxNotifyBody)).Decode(&m); err != nil || m.Title == "" {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	select {
+	case s.notify <- m:
+	default:
+		select { // drop oldest, then enqueue — best-effort
+		case <-s.notify:
+		default:
+		}
+		select {
+		case s.notify <- m:
+		default:
+		}
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// notifyNext long-polls for the next notification (~25s), returning it as JSON or 204
+// when nothing arrived (the renderer immediately reconnects).
+func (s *Server) notifyNext(w http.ResponseWriter, r *http.Request) {
+	select {
+	case m := <-s.notify:
+		writeJSON(w, m)
+	case <-time.After(25 * time.Second):
+		w.WriteHeader(http.StatusNoContent)
+	case <-r.Context().Done():
+		w.WriteHeader(http.StatusNoContent)
+	}
 }
 
 // ─── local file read ───────────────────────────────────────────────────────────

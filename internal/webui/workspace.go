@@ -62,6 +62,7 @@ type Workspace struct {
 	menuX    int
 	menuY    int
 
+	wctx    app.Context   // captured in OnMount; drives cold-path re-renders from child tiles
 	ctlStop chan struct{} // stops the MCP control long-poll loop
 
 	// appearance / background (the editing UI lives in the shared bgEditor component)
@@ -79,6 +80,7 @@ type Workspace struct {
 func (w *Workspace) CompoID() string { return "ws:" + w.Ref.ID }
 
 func (w *Workspace) OnMount(ctx app.Context) {
+	w.wctx = ctx // used by child tiles (e.g. Claude) to trigger cold-path label refreshes
 	// Report divider-drag ratios from JS back into the layout tree.
 	app.Window().Set("phWsRatio", app.FuncOf(func(_ app.Value, args []app.Value) any {
 		if len(args) >= 2 {
@@ -105,6 +107,19 @@ func (w *Workspace) OnMount(ctx app.Context) {
 			paneID, path := args[0].String(), args[1].String()
 			ctx.Dispatch(func(app.Context) {
 				w.setParam(paneID, "path", path)
+				w.persistSoon()
+			})
+		}
+		return nil
+	}))
+	// Persist a terminal tile's live PTY id so a renderer reload can reattach to the
+	// still-running session (scrollback replayed by the sidecar) instead of starting a
+	// fresh one. Args: paneID, ptyID.
+	app.Window().Set("phPtyState", app.FuncOf(func(_ app.Value, args []app.Value) any {
+		if len(args) >= 2 {
+			paneID, ptyID := args[0].String(), args[1].String()
+			ctx.Dispatch(func(app.Context) {
+				w.setParam(paneID, "pty_id", ptyID)
 				w.persistSoon()
 			})
 		}
@@ -338,6 +353,7 @@ func (w *Workspace) addMenu() app.UI {
 		opt("Claude", domain.TileClaude, nil),
 		opt("Pipepush", domain.TilePipepush, nil),
 		opt("Passbubble", domain.TilePassbubble, nil),
+		opt("Redmine", domain.TileRedmine, nil),
 	)
 }
 
@@ -503,14 +519,26 @@ func (w *Workspace) renderTileBody(n *domain.LayoutNode) app.UI {
 	case domain.TileTabs:
 		return &tabsTile{Native: w.Native, ProjectID: w.Ref.ID}
 	case domain.TileClaude:
+		pane := n.PaneID
 		return &claudeTile{Native: w.Native, Cwd: w.Ref.LocalPath,
 			OpenClaude: func(ctx app.Context, cwd, prompt string) {
 				w.addTile(domain.TileTerminal, map[string]string{"cwd": cwd, "cmd": "claude", "prompt": prompt})
+			},
+			OnActiveChat: func(title string) {
+				// Cold-path: dispatch on the workspace ctx (captured in OnMount, always
+				// set by the time this tile has rendered) so the parent tile toolbar
+				// (tileLabel) re-renders, not just the child claudeTile.
+				w.wctx.Dispatch(func(app.Context) {
+					w.setParam(pane, "chat_title", title)
+					w.persistSoon()
+				})
 			}}
 	case domain.TilePipepush:
 		return &pipepushTile{Store: w.Store, Native: w.Native, FolderID: w.Ref.FolderID}
 	case domain.TilePassbubble:
 		return &passbubbleTile{Store: w.Store, FolderID: w.Ref.FolderID}
+	case domain.TileRedmine:
+		return &redmineTile{Store: w.Store, Native: w.Native, FolderID: w.Ref.FolderID}
 	default:
 		return app.Div().Class("ph-muted").Text("Unbekannter Tile-Typ")
 	}
@@ -1014,11 +1042,13 @@ func tileLabel(n *domain.LayoutNode) string {
 	case domain.TileTabs:
 		return "Browser-Tabs"
 	case domain.TileClaude:
-		return "Claude"
+		return orText(n.Params["chat_title"], "Claude")
 	case domain.TilePipepush:
 		return "Pipepush"
 	case domain.TilePassbubble:
 		return "Passbubble"
+	case domain.TileRedmine:
+		return "Redmine"
 	}
 	return string(n.Type)
 }
