@@ -19,7 +19,6 @@ import (
 	"context"
 	"os"
 	"testing"
-	"time"
 )
 
 // Opt-in check against a real Passbubble: the unit tests above pin the client's
@@ -49,12 +48,6 @@ func TestLiveRefresh(t *testing.T) {
 		t.Fatalf("ListEntries with a fresh token: %v", err)
 	}
 
-	// Passbubble's tokens carry second-resolution iat/exp claims, so a refresh in the
-	// same second as the login mints a byte-identical refresh token and the server's
-	// unique session-hash constraint turns it into a 500. Real renewals happen ~15
-	// minutes in; wait past the second boundary so this test sees the real path.
-	time.Sleep(1100 * time.Millisecond)
-
 	// Stand in for an expired access token, keeping the (valid) refresh token: the
 	// next call must renew and succeed instead of failing with 401.
 	c.SetSession(&LoginResponse{AccessToken: "expired-token", RefreshToken: resp.RefreshToken, ExpiresIn: 3600})
@@ -66,9 +59,7 @@ func TestLiveRefresh(t *testing.T) {
 	}
 
 	// Last line of defence: with the refresh token gone too, the Reauth hook (a full
-	// re-login, what the desktop wires up) has to carry the session. Same second-
-	// boundary caveat as above — the renewal just above minted a session.
-	time.Sleep(1100 * time.Millisecond)
+	// re-login, what the desktop wires up) has to carry the session.
 	reauths := 0
 	c.Reauth = func(ctx context.Context) (*LoginResponse, error) {
 		reauths++
