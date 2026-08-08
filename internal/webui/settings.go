@@ -17,6 +17,7 @@ package webui
 
 import (
 	"context"
+	"strings"
 
 	"github.com/maxence-charriere/go-app/v10/pkg/app"
 
@@ -98,6 +99,7 @@ func (r *Root) settingsView() app.UI {
 		{"appearance", "Erscheinungsbild"},
 		{"editor", "Editor"},
 		{"terminal", "Terminal"},
+		{"windows", "Fenster"},
 		{"account", "Konto"},
 		{"about", "Über"},
 	}
@@ -164,6 +166,8 @@ func (r *Root) settingsPane(tab string) app.UI {
 		return r.settingsEditor()
 	case "terminal":
 		return r.settingsTerminal()
+	case "windows":
+		return r.settingsWindows()
 	case "account":
 		return r.settingsAccount()
 	case "about":
@@ -408,6 +412,71 @@ func (r *Root) settingsTerminal() app.UI {
 				}),
 			),
 		app.P().Class("ph-settings-note").Text("Diese Taste springt/löscht im Terminal wortweise: Taste+←/→ springt ein Wort, Taste+Backspace/Entf löscht ein Wort. Gilt nur auf diesem Gerät."),
+	)
+}
+
+// ─── Fenster tab ──────────────────────────────────────────────────────────────
+
+// newWindowModOptions mirrors NEW_WINDOW_MODS in the Electron main process. The
+// labels name both platforms' key because the setting is device-local.
+var newWindowModOptions = []struct{ Key, Label string }{
+	{"CommandOrControl", "Strg / Cmd"},
+	{"Alt", "Alt / Option"},
+	{"Super", "Super / Win"},
+	{"CommandOrControl+Alt", "Strg+Alt / Cmd+Alt"},
+}
+
+// newWindowMod reads the device-local modifier of the "open project in a new window"
+// shortcut from the shell. available=false in the hosted browser build.
+func newWindowMod() (mod string, available bool) {
+	pw := app.Window().Get("phWindow")
+	if !pw.Truthy() || !pw.Get("getNewWindowMod").Truthy() {
+		return "CommandOrControl", false
+	}
+	v := pw.Call("getNewWindowMod").String()
+	if v == "" {
+		v = "CommandOrControl"
+	}
+	return v, true
+}
+
+// setNewWindowMod persists the modifier and rebinds the menu accelerator live.
+func setNewWindowMod(mod string) {
+	if pw := app.Window().Get("phWindow"); pw.Truthy() && pw.Get("setNewWindowMod").Truthy() {
+		pw.Call("setNewWindowMod", mod)
+	}
+}
+
+// shortcutLabel renders an accelerator modifier as the key combination it produces.
+func shortcutLabel(mod string) string {
+	return strings.ReplaceAll(mod, "CommandOrControl", "Strg/Cmd") + "+Shift+N"
+}
+
+func (r *Root) settingsWindows() app.UI {
+	cur, ok := newWindowMod()
+	if !ok {
+		return app.Div().Body(
+			app.P().Class("ph-eyebrow").Text("Fenster"),
+			app.P().Class("ph-settings-note").Text("Fenster-Einstellungen sind nur im Desktop-Build verfügbar."),
+		)
+	}
+	return app.Div().Body(
+		app.P().Class("ph-eyebrow").Text("Projekt in neuem Fenster öffnen"),
+		app.Select().Class("ph-select").
+			OnChange(func(ctx app.Context, e app.Event) {
+				mod := ctx.JSSrc().Get("value").String()
+				setNewWindowMod(mod)
+				r.status = "" // re-render so the note below shows the new combination
+			}).
+			Body(
+				app.Range(newWindowModOptions).Slice(func(i int) app.UI {
+					o := newWindowModOptions[i]
+					return app.Option().Value(o.Key).Text(o.Label).Selected(o.Key == cur)
+				}),
+			),
+		app.P().Class("ph-settings-note").Text("Ein Klick auf ein Projekt öffnet es immer im aktuellen Fenster. "+
+			shortcutLabel(cur)+" (oder „Datei → Projekt in neuem Fenster öffnen“) übergibt das offene Projekt "+
+			"an ein eigenes Fenster. Gilt nur auf diesem Gerät."),
 	)
 }
 

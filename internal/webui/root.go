@@ -65,11 +65,13 @@ type Root struct {
 	projects []domain.ProjectRef
 	selected *domain.ProjectRef // non-nil → showing a project's detail page
 
-	// Multi-window (desktop): pinned marks a window that is dedicated to one project
-	// (opened via a "#/p/<id>" hash) — its "← Projekte" closes the window rather than
-	// returning to the home view. pendingProjectID is that id, applied once the project
-	// list has loaded (works for both auto- and manual unlock).
-	pinned           bool
+	// Multi-window (desktop): windowProjectID is the project this window was opened
+	// for (empty in the home/launcher window) — a dedicated window is only ever created
+	// on demand (menu bar / shortcut), never by clicking a project. In such a window
+	// "← Projekte" closes it rather than returning to the home view. pendingProjectID
+	// is the same id before the project list has loaded; it is applied as soon as the
+	// list arrives (after either auto- or manual unlock).
+	windowProjectID  string
 	pendingProjectID string
 
 	// desktop (Electron) integration: nil in the hosted browser build
@@ -190,6 +192,19 @@ func (r *Root) chatSidebar() app.UI {
 	)
 }
 
+// windowProject reports which project this window was opened for ("" = the home
+// window). The Electron shell passes the id through the preload bridge
+// (phWindow.projectId); the "#/p/<id>" location hash is the fallback and doubles as a
+// human-readable marker of what a window holds.
+func windowProject() string {
+	if pw := app.Window().Get("phWindow"); pw.Truthy() {
+		if v := pw.Get("projectId"); v.Truthy() {
+			return v.String()
+		}
+	}
+	return hashProjectID()
+}
+
 // hashProjectID parses a "#/p/<id>" location hash into the project id ("" if none).
 func hashProjectID() string {
 	loc := app.Window().Get("location")
@@ -205,8 +220,7 @@ func hashProjectID() string {
 }
 
 // openProjectWindow asks the Electron shell to open (or focus) a dedicated window for
-// the project. Returns false in the hosted browser build (no phWindow bridge), where the
-// caller falls back to switching the view in place.
+// the project. Returns false in the hosted browser build (no phWindow bridge).
 func openProjectWindow(id string) bool {
 	pw := app.Window().Get("phWindow")
 	if !pw.Truthy() || !pw.Get("openProject").Truthy() {
@@ -216,25 +230,70 @@ func openProjectWindow(id string) bool {
 	return true
 }
 
-// navProject opens a project: a dedicated window on the desktop, or in place otherwise.
+// navProject opens a project in this window. A second window is never spawned here —
+// that only happens on the explicit "in neuem Fenster öffnen" action (menu bar /
+// shortcut), see openInNewWindow.
 func (r *Root) navProject(ref domain.ProjectRef) {
-	if openProjectWindow(ref.ID) {
-		return // handled by opening/focusing that project's window
-	}
 	r.selected = &ref
+	// A dedicated window that switches project in place keeps its identity in sync with
+	// what it shows, so the shell keeps focusing the right window for a project.
+	if r.windowProjectID != "" && ref.ID != r.windowProjectID {
+		if pw := app.Window().Get("phWindow"); pw.Truthy() && pw.Get("setProject").Truthy() {
+			pw.Call("setProject", ref.ID)
+		}
+		r.windowProjectID = ref.ID
+	}
 }
 
-// openProject shows a project (own window on desktop, in place in the hosted build).
+// openProject is the click handler that shows a project in this window.
 func (r *Root) openProject(ref domain.ProjectRef) func(ctx app.Context, e app.Event) {
 	return func(ctx app.Context, _ app.Event) {
 		r.navProject(ref)
 	}
 }
 
-// closeProject returns to the project list, refreshing it. In a pinned (per-project)
+// openInNewWindow hands the open project over to a window of its own: the shell opens
+// (or focuses) that window, and this one lets the project go — back to the home view,
+// or closing itself if it is already a dedicated project window. Handing over rather
+// than duplicating keeps a project's terminals/webviews mounted exactly once.
+func (r *Root) openInNewWindow(ctx app.Context) {
+	if r.selected == nil {
+		r.status = "Kein Projekt geöffnet — zuerst ein Projekt öffnen."
+		return
+	}
+	id := r.selected.ID
+	if id == r.windowProjectID {
+		return // this window already IS that project's window
+	}
+	if !openProjectWindow(id) {
+		return // hosted browser build: no shell, nothing to hand over to
+	}
+	r.closeProject(ctx)
+}
+
+// applyPendingProject selects the project a dedicated window was opened for, once the
+// project list is available. It runs on both paths into an unlocked session — the
+// auto-unlock/manual login (doLogin) and any later reload — because a fresh window
+// reaches its project through the first of those, not through reload. Must be called
+// on the render loop (inside ctx.Dispatch).
+func (r *Root) applyPendingProject(projects []domain.ProjectRef) {
+	if r.pendingProjectID == "" {
+		return
+	}
+	for i := range projects {
+		if projects[i].ID == r.pendingProjectID {
+			ref := projects[i]
+			r.selected = &ref
+			break
+		}
+	}
+	r.pendingProjectID = ""
+}
+
+// closeProject returns to the project list, refreshing it. In a dedicated (per-project)
 // desktop window it instead closes the window — home lives in its own window.
 func (r *Root) closeProject(ctx app.Context) {
-	if r.pinned {
+	if r.windowProjectID != "" {
 		if pw := app.Window().Get("phWindow"); pw.Truthy() && pw.Get("close").Truthy() {
 			pw.Call("close")
 			return
@@ -254,10 +313,19 @@ func (r *Root) closeProject(ctx app.Context) {
 // is localStorage on the loopback desktop origin — the user's explicit, local-only
 // opt-in (a keychain-backed store is a later hardening step).
 func (r *Root) OnMount(ctx app.Context) {
-	// Multi-window: a per-project window loads "#/p/<id>". Remember it so the project
-	// is selected once the list loads; mark the window pinned so "back" closes it.
-	if id := hashProjectID(); id != "" {
-		r.pendingProjectID, r.pinned = id, true
+	// Multi-window: a dedicated project window tells us its project through the shell
+	// bridge. Remember it so the project is selected as soon as the list loads (after
+	// either auto- or manual unlock) and "← Projekte" closes the window.
+	if id := windowProject(); id != "" {
+		r.windowProjectID, r.pendingProjectID = id, id
+	}
+	// The shell's menu-bar action / keyboard shortcut ("Projekt in neuem Fenster
+	// öffnen") calls back in here — the renderer is what knows the open project.
+	if pw := app.Window().Get("phWindow"); pw.Truthy() && pw.Get("onNewWindow").Truthy() {
+		pw.Call("onNewWindow", app.FuncOf(func(_ app.Value, _ []app.Value) any {
+			ctx.Dispatch(func(ctx app.Context) { r.openInNewWindow(ctx) })
+			return nil
+		}))
 	}
 	if r.unlocked {
 		return
@@ -372,7 +440,17 @@ func (r *Root) doLogin(ctx app.Context) {
 			r.fail(ctx, err.Error())
 			return
 		}
-		api.SetToken(resp.AccessToken)
+		// Adopt the whole session (access + refresh token + expiry) so the client keeps
+		// itself alive: it renews before the access token expires and retries a 401 once.
+		// Without this a window left open long enough turned every tile into "api error
+		// 401" until the app was restarted.
+		api.SetSession(resp)
+		// Last resort when even the refresh token has expired (window open for days):
+		// log in again with the credentials of this session. They stay in the WASM heap
+		// only — same exposure as the master key the vault already holds unlocked.
+		api.Reauth = func(ctx context.Context) (*pbclient.LoginResponse, error) {
+			return api.Login(ctx, pbclient.LoginRequest{Email: email, Password: password})
+		}
 		st := store.New(api, keys)
 
 		projects, err := st.ListProjects(context.Background())
@@ -412,6 +490,7 @@ func (r *Root) doLogin(ctx app.Context) {
 			r.unlocked = true
 			r.store = st
 			r.projects = projects
+			r.applyPendingProject(projects) // a dedicated window opens its project now
 			r.accent = accent
 			r.homeView = homeView
 			r.theme = theme
@@ -759,17 +838,7 @@ func (r *Root) reload(ctx app.Context, mutate func()) {
 		// drop it from the offered list.
 		r.suggestions = filterAdded(r.suggestions, projects)
 		r.busy = false
-		// Multi-window: a pinned window selects its project once the list is available.
-		if r.pendingProjectID != "" {
-			for i := range projects {
-				if projects[i].ID == r.pendingProjectID {
-					ref := projects[i]
-					r.selected = &ref
-					break
-				}
-			}
-			r.pendingProjectID = ""
-		}
+		r.applyPendingProject(projects)
 	})
 	pushRoster(r.native, projects)
 }

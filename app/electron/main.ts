@@ -6,7 +6,17 @@
 // port + token are injected into the renderer via the preload bridge (window.phNative)
 // so the WASM UI can call the token-guarded /native API for local-machine actions.
 
-import { app, BrowserWindow, session, WebContents, ipcMain, safeStorage, Notification } from "electron";
+import {
+  app,
+  BrowserWindow,
+  Menu,
+  MenuItemConstructorOptions,
+  session,
+  WebContents,
+  ipcMain,
+  safeStorage,
+  Notification,
+} from "electron";
 import { spawn, ChildProcess } from "node:child_process";
 import * as readline from "node:readline";
 import * as path from "node:path";
@@ -107,14 +117,20 @@ function onSidecarExit(code: number | null): void {
 function createWindow(projectId: string): BrowserWindow {
   const hs = handshake!;
   const base = `http://127.0.0.1:${hs.port}`;
+  // Reuse the geometry of the window this one was spawned from, offset a little, so a
+  // handed-over project doesn't land in a default-sized window in a corner.
+  const from = BrowserWindow.getFocusedWindow();
+  const bounds = from && !from.isDestroyed() ? from.getBounds() : null;
   // Opt-in window transparency (device-local, from the secure store). A transparent
   // window must be created transparent — it can't be toggled at runtime — so the toggle
   // in Settings writes the flag and relaunches. When on, the deck/wallpaper fade with
   // --app-alpha so the desktop shows through behind ProjectHub.
   const transparent = secureGet("window.transparent") === "1";
   const w = new BrowserWindow({
-    width: 1280,
-    height: 820,
+    width: bounds ? bounds.width : 1280,
+    height: bounds ? bounds.height : 820,
+    x: bounds ? bounds.x + 32 : undefined,
+    y: bounds ? bounds.y + 32 : undefined,
     transparent,
     backgroundColor: transparent ? "#00000000" : "#0f1115",
     webPreferences: {
@@ -123,12 +139,22 @@ function createWindow(projectId: string): BrowserWindow {
       nodeIntegration: false,
       sandbox: true,
       webviewTag: true, // browser-panel tiles use <webview>
-      additionalArguments: [`--ph-port=${hs.port}`, `--ph-token=${hs.token}`],
+      // The project id rides in as a launch argument (not just the URL hash): the WASM
+      // Root reads it from the preload bridge, which survives any client-side routing.
+      additionalArguments: [
+        `--ph-port=${hs.port}`,
+        `--ph-token=${hs.token}`,
+        `--ph-project=${projectId}`,
+      ],
     },
   });
   windows.set(projectId, w);
+  // Drop by identity, not by the id it was created with — a window can be re-keyed
+  // when it navigates to another project in place (see rekeyWindow).
   w.on("closed", () => {
-    if (windows.get(projectId) === w) windows.delete(projectId);
+    for (const [id, other] of windows) {
+      if (other === w) windows.delete(id);
+    }
   });
   // Surface renderer console + errors to the main-process stdout for debugging.
   w.webContents.on("console-message", (_e, _lvl, message) => console.log("[renderer]", message));
@@ -153,6 +179,15 @@ function openWindow(projectId: string): void {
     return;
   }
   createWindow(projectId);
+}
+
+/** Re-key a window when it navigates to another project in place, so "open in new
+ *  window" and focus-the-existing-window keep pointing at the right window. */
+function rekeyWindow(w: BrowserWindow, projectId: string): void {
+  for (const [id, other] of windows) {
+    if (other === w) windows.delete(id);
+  }
+  windows.set(projectId, w);
 }
 
 /** Called on sidecar (re)start. On first start opens the home window; on a restart the
@@ -246,7 +281,7 @@ function registerSecureStore(): void {
 /** Window controls from the renderer. Currently: opt-in transparency, which needs a
  *  relaunch because a BrowserWindow's `transparent` can only be set at creation. */
 function registerWindowControls(): void {
-  ipcMain.on("ph-window", (e, req: { op: string; on?: boolean; id?: string }) => {
+  ipcMain.on("ph-window", (e, req: { op: string; on?: boolean; id?: string; mod?: string }) => {
     switch (req.op) {
       case "get-transparent":
         e.returnValue = secureGet("window.transparent") === "1";
@@ -263,15 +298,83 @@ function registerWindowControls(): void {
         openWindow(req.id ?? "");
         e.returnValue = true;
         return;
-      case "close":
-        // A pinned project window's "← Projekte" closes the window (back to home).
-        BrowserWindow.fromWebContents(e.sender)?.close();
+      case "set-project": {
+        // A window navigated to another project in place — follow it with the key.
+        const w = BrowserWindow.fromWebContents(e.sender);
+        if (w) rekeyWindow(w, req.id ?? "");
         e.returnValue = true;
         return;
+      }
+      case "get-newwindow-mod":
+        e.returnValue = newWindowMod();
+        return;
+      case "set-newwindow-mod":
+        secureSet("window.newmod", req.mod ?? "");
+        buildMenu(); // rebind the accelerator immediately
+        e.returnValue = newWindowMod();
+        return;
+      case "close": {
+        // A dedicated project window's "← Projekte" closes the window — home lives in
+        // its own. If this is the last window, bring home up first: "back to projects"
+        // must never quit the app.
+        const w = BrowserWindow.fromWebContents(e.sender);
+        if (w && windows.get("") !== w && windows.size <= 1) openWindow("");
+        w?.close();
+        e.returnValue = true;
+        return;
+      }
       default:
         e.returnValue = null;
     }
   });
+}
+
+// ─── application menu ────────────────────────────────────────────────────────
+// A project opens in the window you are already in. A window of its own is only ever
+// created on demand — from the menu item below or its shortcut, whose modifier is
+// device-local and configurable (Einstellungen → Fenster).
+
+const NEW_WINDOW_MODS = ["CommandOrControl", "Alt", "Super", "CommandOrControl+Alt"] as const;
+
+/** The configured modifier for the "open in new window" accelerator. */
+function newWindowMod(): string {
+  const v = secureGet("window.newmod");
+  return (NEW_WINDOW_MODS as readonly string[]).includes(v) ? v : "CommandOrControl";
+}
+
+/** Ask the focused renderer to hand its open project to a window of its own. The
+ *  renderer answers, because only it knows which project is on screen — it calls back
+ *  through phWindow.openProject and then lets the project go (see openInNewWindow). */
+function requestNewWindow(from?: { id: number }): void {
+  // Prefer the window the menu was invoked from; fall back to the focused one (the
+  // accelerator path, where the menu doesn't hand us a window on every platform).
+  const w = (from ? BrowserWindow.fromId(from.id) : null) ?? BrowserWindow.getFocusedWindow();
+  if (!w || w.isDestroyed()) return;
+  w.webContents.send("ph-menu", { op: "new-window" });
+}
+
+function buildMenu(): void {
+  const isMac = process.platform === "darwin";
+  const template: MenuItemConstructorOptions[] = [
+    ...(isMac ? ([{ role: "appMenu" }] as MenuItemConstructorOptions[]) : []),
+    {
+      label: "Datei",
+      submenu: [
+        {
+          label: "Projekt in neuem Fenster öffnen",
+          accelerator: `${newWindowMod()}+Shift+N`,
+          click: (_item, w) => requestNewWindow(w),
+        },
+        { type: "separator" },
+        { role: "close", label: "Fenster schließen" },
+        ...(isMac ? [] : ([{ role: "quit", label: "Beenden" }] as MenuItemConstructorOptions[])),
+      ],
+    },
+    { role: "editMenu", label: "Bearbeiten" },
+    { role: "viewMenu", label: "Ansicht" },
+    { role: "windowMenu", label: "Fenster" },
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
 /** Show native OS notifications on request from the renderer (todo reminders). */
@@ -303,6 +406,7 @@ app.whenReady().then(async () => {
   registerWindowControls();
   registerNotifications();
   hardenWebviewGuests();
+  buildMenu();
   try {
     const hs = await startSidecar();
     loadRenderer(hs);

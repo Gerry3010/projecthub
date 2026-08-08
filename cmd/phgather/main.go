@@ -396,7 +396,7 @@ func login(ctx context.Context, server, email, password string) (*store.Store, e
 	if err != nil {
 		return nil, fmt.Errorf("unlock: %w", err)
 	}
-	api.SetToken(resp.AccessToken)
+	api.SetSession(resp)
 	return store.New(api, keys), nil
 }
 

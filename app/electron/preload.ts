@@ -43,19 +43,43 @@ contextBridge.exposeInMainWorld("phSecure", {
 // can only be applied when the window is created, so setTransparent persists the flag
 // (secure store) and relaunches the app. getTransparent reads the current flag so the
 // Settings toggle can reflect it. Synchronous (sendSync) like phSecure.
+
+// The menu bar's "open in new window" is answered by the renderer (only it knows which
+// project is on screen), so it registers a callback here that the main process triggers.
+let newWindowCB: (() => void) | null = null;
+ipcRenderer.on("ph-menu", (_e, req: { op?: string }) => {
+  if (req?.op === "new-window") newWindowCB?.();
+});
+
 contextBridge.exposeInMainWorld("phWindow", {
   getTransparent: (): boolean => ipcRenderer.sendSync("ph-window", { op: "get-transparent" }) === true,
   setTransparent: (on: boolean): void => {
     ipcRenderer.sendSync("ph-window", { op: "set-transparent", on });
   },
-  // Multi-window: open (or focus) a dedicated window per project; "" targets home.
+  // Multi-window: the project this window was opened for ("" = the home window).
+  projectId: argValue("--ph-project="),
+  // Open (or focus) a dedicated window per project; "" targets home. Only called from
+  // the explicit "in neuem Fenster öffnen" action — clicking a project stays in place.
   openProject: (id: string): void => {
     ipcRenderer.send("ph-window", { op: "open-project", id });
   },
-  // Close the calling window (a pinned project window's "back to projects").
+  // Tell the shell this window now shows another project (in-place navigation), so the
+  // per-project window bookkeeping follows along.
+  setProject: (id: string): void => {
+    ipcRenderer.sendSync("ph-window", { op: "set-project", id });
+  },
+  // Close the calling window (a dedicated project window's "back to projects").
   close: (): void => {
     ipcRenderer.send("ph-window", { op: "close" });
   },
+  // Register the renderer's handler for the menu action / keyboard shortcut.
+  onNewWindow: (cb: () => void): void => {
+    newWindowCB = cb;
+  },
+  // Device-local modifier of the "open in new window" shortcut (…+Shift+N).
+  getNewWindowMod: (): string => ipcRenderer.sendSync("ph-window", { op: "get-newwindow-mod" }) || "",
+  setNewWindowMod: (mod: string): string =>
+    ipcRenderer.sendSync("ph-window", { op: "set-newwindow-mod", mod }) || "",
 });
 
 // phNotify shows a native OS desktop notification (Electron Notification API in the

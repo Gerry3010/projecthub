@@ -314,7 +314,7 @@ func (m Model) login() tea.Cmd {
 		if err != nil {
 			return errMsg{err}
 		}
-		api.SetToken(resp.AccessToken)
+		api.SetSession(resp)
 		st := store.New(api, keys)
 		projects, err := st.ListProjects(ctx)
 		if err != nil {
