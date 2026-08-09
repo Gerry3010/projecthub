@@ -53,20 +53,41 @@ let handshake: Handshake | null = null; // latest sidecar handshake (for new win
 let restarts = 0;
 const MAX_RESTARTS = 5;
 let quitting = false;
-// Local Passbubble backend, dev-only auto-start. We stop on quit only what we started.
+// Local Passbubble backend auto-start. Dev finds it beside the repo; the packaged app reads
+// the path from the device-local secure store (set in Settings). We stop on quit only what we
+// started, and never touch Docker Desktop itself.
 let startedBackend = false;
 let stopping = false;
+let backendStarting = false; // guards concurrent startBackend() (boot + on-demand)
 
-/** The local Passbubble repo dir (dev): its docker-compose.yml sits beside this repo as
- *  ../Password-Manager. __dirname is app/dist, so the repo root is two levels up (matching
- *  sidecarCwd()) and Passbubble one further. Overridable for non-standard layouts. */
+/** The local Passbubble repo dir (its docker-compose.yml). Precedence: the device-local
+ *  setting from the Settings UI (how the packaged app learns the path), then PROJECTHUB_PB_DIR,
+ *  then the dev sibling ../Password-Manager (repo root is two levels up from app/dist,
+ *  matching sidecarCwd()). */
 function pbDir(): string {
-  return process.env.PROJECTHUB_PB_DIR || path.join(__dirname, "..", "..", "..", "Password-Manager");
+  return (
+    secureGet("backend.pbdir") ||
+    process.env.PROJECTHUB_PB_DIR ||
+    path.join(__dirname, "..", "..", "..", "Password-Manager")
+  );
 }
 
 /** The URL phd proxies /pb to — used to detect an already-running backend. */
 function pbURL(): string {
   return process.env.PROJECTHUB_PB_URL || "http://localhost:8080";
+}
+
+/** The docker CLI. Apps launched from Launchpad/Finder inherit a minimal PATH without Docker
+ *  Desktop's bin, so resolve the common absolute locations before falling back to "docker". */
+function dockerBin(): string {
+  for (const c of [
+    "/opt/homebrew/bin/docker",
+    "/usr/local/bin/docker",
+    path.join(app.getPath("home"), ".docker", "bin", "docker"),
+  ]) {
+    if (fs.existsSync(c)) return c;
+  }
+  return "docker";
 }
 
 /** Resolve true if the backend answers at all (any HTTP status), false on error/timeout. */
@@ -81,11 +102,48 @@ function backendReachable(): Promise<boolean> {
   });
 }
 
+/** Resolve true if the docker daemon answers (`docker info` exits 0), with a hard timeout so a
+ *  stopped daemon can't wedge startup. */
+function dockerReady(): Promise<boolean> {
+  return new Promise((resolve) => {
+    const proc = spawn(dockerBin(), ["info"], { stdio: "ignore" });
+    const t = setTimeout(() => {
+      proc.kill("SIGKILL");
+      resolve(false);
+    }, 5000);
+    proc.on("error", () => {
+      clearTimeout(t);
+      resolve(false);
+    });
+    proc.on("exit", (code) => {
+      clearTimeout(t);
+      resolve(code === 0);
+    });
+  });
+}
+
+/** Ensure the docker daemon is up, launching Docker Desktop (best-effort) if it isn't and
+ *  waiting up to ~60s for it. macOS only (`open -a Docker`). */
+async function ensureDockerRunning(): Promise<boolean> {
+  if (await dockerReady()) return true;
+  console.log("[backend] docker daemon down — launching Docker Desktop…");
+  spawn("open", ["-a", "Docker"], { stdio: "ignore" }).on("error", () => {});
+  for (let i = 0; i < 60; i++) {
+    await new Promise((r) => setTimeout(r, 1000));
+    if (await dockerReady()) {
+      console.log("[backend] docker daemon is up");
+      return true;
+    }
+  }
+  console.log("[backend] docker daemon did not come up in time");
+  return false;
+}
+
 /** Run `docker compose <args>` in pbDir(); resolve with the exit code, or null if docker
- *  could not be spawned (not installed / not on PATH). Output is echoed under [backend]. */
+ *  could not be spawned. Output is echoed under [backend]. */
 function dockerCompose(args: string[]): Promise<number | null> {
   return new Promise((resolve) => {
-    const proc = spawn("docker", ["compose", ...args], {
+    const proc = spawn(dockerBin(), ["compose", ...args], {
       cwd: pbDir(),
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -97,44 +155,56 @@ function dockerCompose(args: string[]): Promise<number | null> {
   });
 }
 
-/** Dev-only: bring up the local Passbubble stack before the sidecar so login works out of the
- *  box. Silently skips (never fatal) when packaged, opted out, the compose dir/docker are
- *  missing, or the backend is already up — and sets startedBackend only when THIS launch
- *  actually started it, so stopBackend() on quit touches nothing we didn't start. */
+/** Bring up the local Passbubble stack (dev sibling or the configured dir) so login works out
+ *  of the box, launching Docker Desktop if needed. Silently skips (never fatal) when opted out,
+ *  no compose dir/docker is found, or the backend is already up. Sets startedBackend only when
+ *  THIS process actually started it, so stopBackend() on quit touches nothing we didn't start.
+ *  Safe to call again at runtime (e.g. right after the path is set in Settings). */
 async function startBackend(): Promise<void> {
-  if (app.isPackaged) return; // dev-only: the packaged .app has no sibling repo
-  if (process.env.PROJECTHUB_NO_AUTOSTACK) return; // explicit opt-out
-  if (!fs.existsSync(path.join(pbDir(), "docker-compose.yml"))) {
-    console.log(`[backend] skip: no docker-compose.yml at ${pbDir()}`);
-    return;
-  }
-  if (await backendReachable()) {
-    console.log(`[backend] skip: already reachable at ${pbURL()}`);
-    return; // someone else started it — don't adopt (and thus don't stop) it
-  }
-  console.log("[backend] starting local Passbubble stack…");
-  const code = await dockerCompose(["up", "-d", "postgres", "redis", "mailpit", "backend"]);
-  if (code === null) {
-    console.log("[backend] skip: docker not available");
-    return;
-  }
-  if (code !== 0) {
-    console.error(`[backend] 'docker compose up' exited ${code} — continuing without it`);
-    return;
-  }
-  startedBackend = true;
-  // Best-effort: wait up to ~20s for the backend to answer (purely for a clear log line).
-  for (let i = 0; i < 20; i++) {
-    if (await backendReachable()) {
-      console.log(`[backend] up at ${pbURL()}`);
+  if (backendStarting) return;
+  backendStarting = true;
+  try {
+    if (process.env.PROJECTHUB_NO_AUTOSTACK) return; // explicit opt-out
+    if (secureGet("backend.autostack") === "0") return; // toggled off in Settings
+    const dir = pbDir();
+    if (!fs.existsSync(path.join(dir, "docker-compose.yml"))) {
+      console.log(`[backend] skip: no docker-compose.yml at ${dir}`);
       return;
     }
-    await new Promise((r) => setTimeout(r, 1000));
+    if (await backendReachable()) {
+      console.log(`[backend] skip: already reachable at ${pbURL()}`);
+      return; // someone else started it — don't adopt (and thus don't stop) it
+    }
+    if (!(await ensureDockerRunning())) {
+      console.log("[backend] skip: docker daemon not available");
+      return;
+    }
+    console.log("[backend] starting local Passbubble stack…");
+    const code = await dockerCompose(["up", "-d", "postgres", "redis", "mailpit", "backend"]);
+    if (code === null) {
+      console.log("[backend] skip: docker not available");
+      return;
+    }
+    if (code !== 0) {
+      console.error(`[backend] 'docker compose up' exited ${code} — continuing without it`);
+      return;
+    }
+    startedBackend = true;
+    // Best-effort: wait up to ~20s for the backend to answer (purely for a clear log line).
+    for (let i = 0; i < 20; i++) {
+      if (await backendReachable()) {
+        console.log(`[backend] up at ${pbURL()}`);
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    console.log("[backend] started; not answering yet — login may need a moment");
+  } finally {
+    backendStarting = false;
   }
-  console.log("[backend] started; not answering yet — login may need a moment");
 }
 
-/** Stop the stack this launch started (dev-only), best-effort. */
+/** Stop the stack this process started, best-effort. Docker Desktop itself is left running. */
 async function stopBackend(): Promise<void> {
   if (!startedBackend) return;
   console.log("[backend] stopping local Passbubble stack…");
@@ -391,6 +461,11 @@ function registerWindowControls(): void {
         // Recreate the process so the window is (re)built with the new transparency.
         app.relaunch();
         app.exit(0);
+        return;
+      case "ensure-backend":
+        // The Settings UI just changed the backend path/toggle — (re)attempt the local stack
+        // now instead of waiting for the next launch. Fire-and-forget (renderer used send()).
+        startBackend().catch((err) => console.error("[backend] ensure failed:", err));
         return;
       case "open-project":
         // Open (or focus) a dedicated window for the project. "" reopens/focuses home.

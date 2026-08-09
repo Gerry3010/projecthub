@@ -395,6 +395,15 @@ func (r *Root) loginView() app.UI {
 						OnInput(r.bind(&r.server)),
 				)
 			}),
+			app.If(r.serverEditable, func() app.UI {
+				// Backend auto-start (desktop only): where Passbubble's docker-compose.yml
+				// lives. Here on the login screen so first-run works before any login — the
+				// Settings overlay only renders once unlocked. In a disclosure to stay tidy.
+				return app.Details().Class("ph-server").Body(
+					app.Summary().Text("Backend"),
+					r.backendSettings(),
+				)
+			}),
 			app.If(r.status != "", func() app.UI { return app.P().Class("ph-err").Text(r.status) }),
 		),
 	)

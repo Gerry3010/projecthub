@@ -86,6 +86,11 @@ contextBridge.exposeInMainWorld("phWindow", {
   getNewWindowMod: (): string => ipcRenderer.sendSync("ph-window", { op: "get-newwindow-mod" }) || "",
   setNewWindowMod: (mod: string): string =>
     ipcRenderer.sendSync("ph-window", { op: "set-newwindow-mod", mod }) || "",
+  // Ask the main process to (re)start the local Passbubble backend now — used after the
+  // backend path/auto-start toggle changes in Settings, so it applies without a relaunch.
+  ensureBackend: (): void => {
+    ipcRenderer.send("ph-window", { op: "ensure-backend" });
+  },
 });
 
 // phNotify shows a native OS desktop notification (Electron Notification API in the

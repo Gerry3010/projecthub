@@ -393,6 +393,85 @@ func setTerminalWordMod(mod string) {
 	}
 }
 
+// ─── Passbubble backend auto-start (desktop, device-local) ───────────────────────
+//
+// The desktop shell can bring the local Passbubble stack up on launch and stop it on quit.
+// It needs to know where the docker-compose.yml lives; that path is device-local (and private),
+// so it is stored via the phSecure bridge, never in the account/vault. available=false in the
+// hosted browser build (no bridge).
+
+// passbubbleDir reads the configured compose-dir path from phSecure.
+func passbubbleDir() (dir string, available bool) {
+	ps := app.Window().Get("phSecure")
+	if !ps.Truthy() {
+		return "", false
+	}
+	return ps.Call("get", "backend.pbdir").String(), true
+}
+
+// setPassbubbleDir persists the path and asks the main process to (re)start the backend now,
+// so setting it takes effect without a relaunch. No-op without the bridge.
+func setPassbubbleDir(dir string) {
+	if ps := app.Window().Get("phSecure"); ps.Truthy() {
+		ps.Call("set", "backend.pbdir", dir)
+	}
+	ensureBackend()
+}
+
+// autostackOn reports whether backend auto-start is enabled — default on, "0" = off.
+func autostackOn() bool {
+	ps := app.Window().Get("phSecure")
+	if !ps.Truthy() {
+		return false
+	}
+	return ps.Call("get", "backend.autostack").String() != "0"
+}
+
+// setAutostack persists the toggle and, when enabling, kicks off a start attempt now.
+func setAutostack(on bool) {
+	ps := app.Window().Get("phSecure")
+	if !ps.Truthy() {
+		return
+	}
+	if on {
+		ps.Call("set", "backend.autostack", "1")
+		ensureBackend()
+	} else {
+		ps.Call("set", "backend.autostack", "0")
+	}
+}
+
+// ensureBackend asks the main process to (re)attempt the local backend now. No-op without the
+// desktop bridge.
+func ensureBackend() {
+	if pw := app.Window().Get("phWindow"); pw.Truthy() && pw.Get("ensureBackend").Truthy() {
+		pw.Call("ensureBackend")
+	}
+}
+
+// backendSettings renders the device-local Passbubble backend controls (path + auto-start
+// toggle). Shared by the Settings "Fenster" tab and the login-screen disclosure, so it is
+// reachable before the first login (when the backend isn't up yet). Empty without the bridge.
+func (r *Root) backendSettings() app.UI {
+	dir, ok := passbubbleDir()
+	if !ok {
+		return app.Div()
+	}
+	return app.Div().Body(
+		app.P().Class("ph-eyebrow ph-settings-gap").Text("Passbubble-Backend (Docker)"),
+		app.Label().Class("ph-check").Body(
+			app.Input().Type("checkbox").Checked(autostackOn()).
+				OnChange(func(ctx app.Context, e app.Event) { setAutostack(ctx.JSSrc().Get("checked").Bool()) }),
+			app.Text("Backend automatisch starten"),
+		),
+		app.Input().Type("text").Class("ph-set-input ph-settings-gap").Value(dir).
+			Attr("spellcheck", "false").Attr("placeholder", "/Pfad/zu/Password-Manager").
+			OnChange(func(ctx app.Context, e app.Event) { setPassbubbleDir(ctx.JSSrc().Get("value").String()) }),
+		app.P().Class("ph-settings-note").Text("Ordner mit Passbubbles docker-compose.yml. Geräte-lokal. "+
+			"Beim Start zieht die App den Stack hoch (startet Docker Desktop bei Bedarf) und stoppt ihn beim Beenden."),
+	)
+}
+
 func (r *Root) settingsTerminal() app.UI {
 	cur, ok := terminalWordMod()
 	if !ok {
@@ -477,6 +556,7 @@ func (r *Root) settingsWindows() app.UI {
 		app.P().Class("ph-settings-note").Text("Ein Klick auf ein Projekt öffnet es immer im aktuellen Fenster. "+
 			shortcutLabel(cur)+" (oder „Datei → Projekt in neuem Fenster öffnen“) übergibt das offene Projekt "+
 			"an ein eigenes Fenster. Gilt nur auf diesem Gerät."),
+		r.backendSettings(),
 	)
 }
 
