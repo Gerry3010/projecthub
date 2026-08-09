@@ -58,3 +58,22 @@ linux:
   desktop:
     entry:
       Keywords: projects;claude;code;terminal;passbubble;
+
+# macOS build — arm64 only, ad-hoc signed (no Developer ID / notarization). The Go
+# sidecar binaries shipped as extraResources are darwin/arm64 here and Go ad-hoc-signs
+# them at build time, so they run inside the bundle. electron/main.ts already resolves
+# the sidecar at process.resourcesPath (Contents/Resources), where extraResources land.
+mac:
+  target:
+    - target: dmg
+      arch: arm64
+    - target: zip
+      arch: arm64
+  category: public.app-category.developer-tools
+  icon: build-resources/icon.icns
+  artifactName: ${productName}-${version}-${arch}.${ext}
+  # No `identity:` → electron-builder falls back to ad-hoc signing, which arm64
+  # apps require to launch. Developer-ID signing/notarization is intentionally out.
+
+dmg:
+  title: ${productName} ${version}

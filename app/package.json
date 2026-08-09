@@ -16,6 +16,8 @@
     "start": "electron .",
     "pack": "npm run build:all && electron-builder --linux",
     "pack:dir": "npm run build:all && electron-builder --linux --dir",
+    "pack:mac": "npm run build:all && electron-builder --mac",
+    "pack:mac:dir": "npm run build:all && electron-builder --mac --dir",
     "e2e": "node scripts/drive.mjs",
     "e2e:remember": "node scripts/remember.mjs",
     "e2e:server": "node scripts/server.mjs",

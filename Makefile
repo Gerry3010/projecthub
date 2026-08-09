@@ -3,7 +3,7 @@
 PASSBUBBLE_URL ?= http://localhost:8080
 PORT           ?= 8090
 
-.PHONY: all wasm server sidecar tabhost phmcp pack run tui test vet build clean
+.PHONY: all wasm server sidecar tabhost phmcp pack pack-mac icons run tui test vet build clean
 
 all: build
 
@@ -43,6 +43,20 @@ build: wasm server sidecar tabhost phmcp
 ## app (see app/electron-builder.yml).
 pack: wasm sidecar tabhost phmcp
 	cd app && npm run pack
+
+## pack-mac: bundle the macOS desktop app → app/release (.dmg + .zip, arm64). Same
+## as pack but runs electron-builder --mac; the Go pieces are built for the host
+## (darwin/arm64) and shipped as extraResources. Icon comes from the committed
+## build-resources/icon.icns — run `make icons` after changing web/icon.svg.
+## Needs Node >= 20.19 (electron-builder 26 require()s ESM @noble/hashes; Node 18
+## fails with ERR_REQUIRE_ESM). With nvm: `nvm use` (see app/.nvmrc).
+pack-mac: wasm sidecar tabhost phmcp
+	cd app && npm run pack:mac
+
+## icons: regenerate the macOS icon.icns (+ refresh icon.png) from web/icon.svg.
+## Only needed after the logo changes; the generated icns is committed.
+icons:
+	bash app/scripts/make-icons.sh
 
 ## run: build the wasm frontend, then run the server (serves on $(PORT))
 run: wasm
