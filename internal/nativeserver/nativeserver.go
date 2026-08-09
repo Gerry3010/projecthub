@@ -249,6 +249,7 @@ func (s *Server) claudeResume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name, args := local.ResumeCommand(req.SessionID)
+	name, args = local.DecorateClaude(name, args) // register the projecthub MCP + resolve claude
 	id, err := s.pty.Open(ptyhost.OpenRequest{
 		Cwd: req.Cwd, Cmd: name, Args: args, Cols: req.Cols, Rows: req.Rows,
 	})
@@ -286,6 +287,7 @@ func (s *Server) claudeChat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	name, args := local.ChatCommand(req.Prompt, req.SystemPrompt, req.SessionID, req.Resume)
+	name, args = local.DecorateClaude(name, args) // register the projecthub MCP + resolve claude
 	cmd := exec.Command(name, args...)
 	cmd.Dir = cwd
 	cmd.Env = os.Environ() // inherit PATH so `claude` resolves like it does for the terminal
@@ -316,6 +318,9 @@ func (s *Server) ptyOpen(w http.ResponseWriter, r *http.Request) {
 			req.Cmd = "/bin/bash"
 		}
 	}
+	// A "Terminal (Claude)" tile arrives here as Cmd:"claude" — register the projecthub MCP
+	// and resolve the binary. Non-claude commands (a plain shell) pass through untouched.
+	req.Cmd, req.Args = local.DecorateClaude(req.Cmd, req.Args)
 	id, err := s.pty.Open(req)
 	if err != nil {
 		httpError(w, err)

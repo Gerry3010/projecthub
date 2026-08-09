@@ -70,17 +70,19 @@ Passbubble-Schlüssel und der Tiling-Baum); der Sidecar reicht sie über einen
 Long-Poll-Steuerkanal dorthin weiter. Die Brücke ist `cmd/phmcp` (stdio-MCP-Server),
 die den Sidecar per Discovery-Datei findet — kein Port/Token nötig.
 
-Einrichtung (einmalig, `phmcp` muss gebaut + auf `PATH` sein — `make phmcp`):
+In der Desktop-App ist keine Einrichtung nötig: startet ein Tile ein Claude (Terminal,
+Resume oder Sidebar-Chat), hängt der Sidecar automatisch `--mcp-config` mit dem
+`projecthub`-Server an (`phmcp` wird neben der Sidecar-Exe aufgelöst, kein `PATH` nötig;
+`internal/local.DecorateClaude`). Für Claude außerhalb der App (eigenes Terminal, TUI):
 
 ```bash
-claude mcp add projecthub -- phmcp
-# oder projektweit eine .mcp.json:
+make phmcp                          # baut build/phmcp (auf PATH legen, z.B. via `go install ./cmd/phmcp`)
+claude mcp add projecthub -- phmcp  # oder projektweit eine .mcp.json:
 # { "mcpServers": { "projecthub": { "command": "phmcp" } } }
 ```
 
 Backlog (Folge-PR): `browser.*`-Tools (über die Extension-Command-Queue),
-`layout.sort`, `project_create`, sowie ein automatisches `--mcp-config` beim
-Claude-Terminal-Start.
+`layout.sort`, `project_create`.
 
 ## Status
 

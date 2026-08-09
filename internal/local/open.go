@@ -24,8 +24,12 @@
 package local
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 
 	"github.com/Gerry3010/projecthub/internal/core/domain"
 )
@@ -81,6 +85,97 @@ func ChatCommand(prompt, systemPrompt, sessionID string, resume bool) (name stri
 		args = append(args, "--session-id", sessionID)
 	}
 	return "claude", args
+}
+
+// ─── ProjectHub MCP wiring for tile-hosted Claude ────────────────────────────────
+//
+// A Claude Code started inside a project tile should be able to drive its own project
+// (tiles, todos, files) via the ProjectHub MCP bridge, phmcp. DecorateClaude injects the
+// bridge as a --mcp-config server at every embedded launch. Kept here so internal/local
+// stays the single source of truth for how Claude is invoked.
+
+// isExecutableFile reports whether p is an existing, executable regular file.
+func isExecutableFile(p string) bool {
+	fi, err := os.Stat(p)
+	if err != nil || fi.IsDir() {
+		return false
+	}
+	return fi.Mode()&0o111 != 0
+}
+
+// PhmcpPath resolves the phmcp MCP-bridge binary. It ships next to the sidecar (phd) — in
+// build/ during dev, beside the app in the packaged bundle — so look next to the running
+// executable first, then PATH. Returns "" if it can't be found (MCP injection is then off).
+func PhmcpPath() string {
+	name := "phmcp"
+	if runtime.GOOS == "windows" {
+		name = "phmcp.exe"
+	}
+	if exe, err := os.Executable(); err == nil {
+		if cand := filepath.Join(filepath.Dir(exe), name); isExecutableFile(cand) {
+			return cand
+		}
+	}
+	if p, err := exec.LookPath(name); err == nil {
+		return p
+	}
+	return ""
+}
+
+// ClaudeMCPArgs returns the flags registering ProjectHub's MCP bridge (phmcp) as the
+// "projecthub" server for a Claude invocation. Additive (no --strict-mcp-config), JSON-encoded
+// so an odd phmcp path stays safe. nil when phmcp can't be found — the caller launches plain
+// Claude then.
+func ClaudeMCPArgs() []string { return claudeMCPArgsFor(PhmcpPath()) }
+
+// claudeMCPArgsFor builds the --mcp-config args for a given phmcp path (split out for testing).
+func claudeMCPArgsFor(phmcp string) []string {
+	if phmcp == "" {
+		return nil
+	}
+	cfg, err := json.Marshal(map[string]any{
+		"mcpServers": map[string]any{
+			"projecthub": map[string]any{"command": phmcp},
+		},
+	})
+	if err != nil {
+		return nil
+	}
+	return []string{"--mcp-config", string(cfg)}
+}
+
+// ClaudeBin resolves the claude executable. exec/pty resolve commands against the sidecar's
+// PATH, which is minimal when the app is launched from Launchpad/Finder — so fall back to the
+// common user install locations. Returns "claude" if none is found (let exec surface the error).
+func ClaudeBin() string {
+	if p, err := exec.LookPath("claude"); err == nil {
+		return p
+	}
+	home, _ := os.UserHomeDir()
+	for _, c := range []string{
+		filepath.Join(home, ".local", "bin", "claude"),
+		"/opt/homebrew/bin/claude",
+		"/usr/local/bin/claude",
+		filepath.Join(home, ".claude", "local", "claude"),
+	} {
+		if isExecutableFile(c) {
+			return c
+		}
+	}
+	return "claude"
+}
+
+// DecorateClaude augments a claude invocation for the embedded PTY / headless paths: it resolves
+// claude to an absolute binary and appends the ProjectHub MCP args. Non-claude commands (a plain
+// shell tile) are returned untouched. Deliberately NOT folded into ResumeCommand/ChatCommand:
+// the TUI's external-terminal path renders those into a shell line where the JSON arg would break
+// quoting; the embedded paths pass argv as a []string, so there's no quoting issue.
+func DecorateClaude(name string, args []string) (string, []string) {
+	if filepath.Base(name) != "claude" {
+		return name, args
+	}
+	out := append(append([]string{}, args...), ClaudeMCPArgs()...)
+	return ClaudeBin(), out
 }
 
 // spawn starts a detached process and returns without waiting.
