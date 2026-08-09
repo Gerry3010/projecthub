@@ -181,6 +181,17 @@ function openWindow(projectId: string): void {
   createWindow(projectId);
 }
 
+/** Open an ADDITIONAL empty (home/launcher) window — ⌘N/Ctrl+N means "new window", not
+ *  "focus the existing one", so this deliberately bypasses openWindow(""). Home windows
+ *  are interchangeable, so the map just keeps the newest one under "" — that is the one
+ *  focus-home targets; older ones stay usable and clean themselves out of the map when
+ *  closed. (A sidecar restart rebuilds one window per KEY, so extra empty windows are not
+ *  restored — they hold no state, so nothing is lost.) */
+function newEmptyWindow(): void {
+  if (!handshake) return; // sidecar not up yet — nothing to point a window at
+  createWindow("");
+}
+
 /** Re-key a window when it navigates to another project in place, so "open in new
  *  window" and focus-the-existing-window keep pointing at the right window. */
 function rekeyWindow(w: BrowserWindow, projectId: string): void {
@@ -392,6 +403,13 @@ function buildMenu(): void {
     {
       label: "Datei",
       submenu: [
+        {
+          // Platform-standard "new window": a fresh, empty launcher. Fixed accelerator —
+          // unlike the project hand-over below, which uses the configurable modifier.
+          label: "Neues Fenster",
+          accelerator: "CommandOrControl+N",
+          click: () => newEmptyWindow(),
+        },
         {
           label: "Projekt in neuem Fenster öffnen",
           accelerator: `${newWindowMod()}+Shift+N`,
