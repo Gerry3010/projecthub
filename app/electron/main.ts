@@ -21,6 +21,7 @@ import { spawn, ChildProcess } from "node:child_process";
 import * as readline from "node:readline";
 import * as path from "node:path";
 import * as fs from "node:fs";
+import * as http from "node:http";
 
 interface Handshake {
   port: number;
@@ -52,6 +53,93 @@ let handshake: Handshake | null = null; // latest sidecar handshake (for new win
 let restarts = 0;
 const MAX_RESTARTS = 5;
 let quitting = false;
+// Local Passbubble backend, dev-only auto-start. We stop on quit only what we started.
+let startedBackend = false;
+let stopping = false;
+
+/** The local Passbubble repo dir (dev): its docker-compose.yml sits beside this repo as
+ *  ../Password-Manager. __dirname is app/dist, so the repo root is two levels up (matching
+ *  sidecarCwd()) and Passbubble one further. Overridable for non-standard layouts. */
+function pbDir(): string {
+  return process.env.PROJECTHUB_PB_DIR || path.join(__dirname, "..", "..", "..", "Password-Manager");
+}
+
+/** The URL phd proxies /pb to — used to detect an already-running backend. */
+function pbURL(): string {
+  return process.env.PROJECTHUB_PB_URL || "http://localhost:8080";
+}
+
+/** Resolve true if the backend answers at all (any HTTP status), false on error/timeout. */
+function backendReachable(): Promise<boolean> {
+  return new Promise((resolve) => {
+    const req = http.get(pbURL(), (res) => {
+      res.resume();
+      resolve(true);
+    });
+    req.setTimeout(1000, () => req.destroy());
+    req.on("error", () => resolve(false));
+  });
+}
+
+/** Run `docker compose <args>` in pbDir(); resolve with the exit code, or null if docker
+ *  could not be spawned (not installed / not on PATH). Output is echoed under [backend]. */
+function dockerCompose(args: string[]): Promise<number | null> {
+  return new Promise((resolve) => {
+    const proc = spawn("docker", ["compose", ...args], {
+      cwd: pbDir(),
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const echo = (d: Buffer) => console.log("[backend]", d.toString().trimEnd());
+    proc.stdout!.on("data", echo);
+    proc.stderr!.on("data", echo);
+    proc.on("error", () => resolve(null));
+    proc.on("exit", (code) => resolve(code));
+  });
+}
+
+/** Dev-only: bring up the local Passbubble stack before the sidecar so login works out of the
+ *  box. Silently skips (never fatal) when packaged, opted out, the compose dir/docker are
+ *  missing, or the backend is already up — and sets startedBackend only when THIS launch
+ *  actually started it, so stopBackend() on quit touches nothing we didn't start. */
+async function startBackend(): Promise<void> {
+  if (app.isPackaged) return; // dev-only: the packaged .app has no sibling repo
+  if (process.env.PROJECTHUB_NO_AUTOSTACK) return; // explicit opt-out
+  if (!fs.existsSync(path.join(pbDir(), "docker-compose.yml"))) {
+    console.log(`[backend] skip: no docker-compose.yml at ${pbDir()}`);
+    return;
+  }
+  if (await backendReachable()) {
+    console.log(`[backend] skip: already reachable at ${pbURL()}`);
+    return; // someone else started it — don't adopt (and thus don't stop) it
+  }
+  console.log("[backend] starting local Passbubble stack…");
+  const code = await dockerCompose(["up", "-d", "postgres", "redis", "mailpit", "backend"]);
+  if (code === null) {
+    console.log("[backend] skip: docker not available");
+    return;
+  }
+  if (code !== 0) {
+    console.error(`[backend] 'docker compose up' exited ${code} — continuing without it`);
+    return;
+  }
+  startedBackend = true;
+  // Best-effort: wait up to ~20s for the backend to answer (purely for a clear log line).
+  for (let i = 0; i < 20; i++) {
+    if (await backendReachable()) {
+      console.log(`[backend] up at ${pbURL()}`);
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  console.log("[backend] started; not answering yet — login may need a moment");
+}
+
+/** Stop the stack this launch started (dev-only), best-effort. */
+async function stopBackend(): Promise<void> {
+  if (!startedBackend) return;
+  console.log("[backend] stopping local Passbubble stack…");
+  await dockerCompose(["stop"]);
+}
 
 /** Spawn phd and resolve with its handshake (rejects if it dies before announcing). */
 function startSidecar(): Promise<Handshake> {
@@ -459,6 +547,11 @@ app.whenReady().then(async () => {
   hardenWebviewGuests();
   buildMenu();
   try {
+    await startBackend();
+  } catch (e) {
+    console.error("[backend] auto-start failed (continuing):", e);
+  }
+  try {
     const hs = await startSidecar();
     loadRenderer(hs);
   } catch (e) {
@@ -477,7 +570,7 @@ app.on("window-all-closed", () => {
 });
 
 /** Kill the sidecar cleanly on quit: SIGTERM, then SIGKILL after a grace period. */
-app.on("before-quit", () => {
+app.on("before-quit", (e) => {
   quitting = true;
   if (child) {
     const proc = child;
@@ -485,5 +578,14 @@ app.on("before-quit", () => {
     setTimeout(() => {
       if (!proc.killed) proc.kill("SIGKILL");
     }, 2000);
+  }
+  // Stop the local backend WE started before the process exits. Defer the quit until
+  // `docker compose stop` returns; the `stopping` guard lets the re-quit pass straight
+  // through, and the timeout is a dead-man's switch against a hung docker.
+  if (startedBackend && !stopping) {
+    stopping = true;
+    e.preventDefault();
+    setTimeout(() => app.exit(0), 8000);
+    stopBackend().finally(() => app.quit());
   }
 });

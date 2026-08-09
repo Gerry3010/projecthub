@@ -52,6 +52,13 @@ make vet         # native + wasm vet
 
 Dann http://localhost:8090 öffnen und mit dem Passbubble-Konto anmelden.
 
+**Desktop-App (Electron):** `cd app && npm run dev` startet die Shell. Im Dev-Modus zieht
+sie den lokalen Passbubble-Stack (`docker compose up -d …` in `../Password-Manager`)
+**automatisch** hoch, sofern er nicht schon läuft, und **stoppt** ihn beim Beenden wieder.
+Abschalten mit `PROJECTHUB_NO_AUTOSTACK=1`; Pfad/URL via `PROJECTHUB_PB_DIR` /
+`PROJECTHUB_PB_URL`. Im gepackten `.app` ist das aus (kein Nachbar-Repo). Packaging: `make
+pack-mac` (macOS, braucht Node ≥20.19 → `nvm use` in `app/`).
+
 ## MCP (Claude Code steuert den Workspace)
 
 Der Sidecar stellt einen MCP-Server bereit, mit dem Claude Code — laufend im
