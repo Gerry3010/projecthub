@@ -97,6 +97,34 @@ function parkIslands(): void {
   registry.forEach((island) => {
     if (island.el.parentElement !== pen) pen.appendChild(island.el);
   });
+  // go-app re-renders synchronously right after this call, so re-home on the following
+  // frames. Two passes: the first catches the common case, the second covers a slot that
+  // only appears once the new layout has settled.
+  requestAnimationFrame(() => {
+    rehomeIslands();
+    requestAnimationFrame(rehomeIslands);
+  });
+}
+
+/** Move every parked island back into its slot, for slots that exist right now.
+ *
+ *  This must not rely on the slot component's mount/update hooks: go-app skips OnUpdate
+ *  entirely when no field changed (node.go updateComponent returns early on
+ *  !modifiedFields). A tile that merely SURVIVES a layout mutation keeps the same
+ *  PaneID/Type/Params, so its slot component is reused without any hook firing — and its
+ *  island would stay in the pen, leaving a tile that is present but empty. */
+function rehomeIslands(): void {
+  registry.forEach((island, paneID) => {
+    const slot = document.getElementById("ph-slot-" + paneID);
+    if (!slot || island.el.parentElement === slot) return;
+    slot.innerHTML = "";
+    slot.appendChild(island.el);
+    if (!island.attached) {
+      island.attached = true;
+      requestAnimationFrame(() => island.onAttached?.());
+    }
+    if (island.type === "terminal") queueMicrotask(() => (island.el as any)._fit?.());
+  });
 }
 
 function destroyIsland(paneID: string): void {
@@ -1452,6 +1480,7 @@ function safeParse(s: string): Record<string, string> {
   attachIsland,
   destroyIsland,
   parkIslands,
+  rehomeIslands,
   applySearchEngine,
   applyEditorTheme,
   applyTerminalWordMod,
