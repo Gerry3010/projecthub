@@ -16,3 +16,9 @@ go.work.sum
 # browser-extension signing key (only needed to pack a .crx for distribution;
 # unpacked dev loads fine without it via the manifest "key"). Keep out of git.
 /extension/signing-key.b64
+
+# phseed's personal project-dir list (see phseed-dirs.example.txt for the format)
+/phseed-dirs.txt
+
+# chattr agents-chat binding written by the chattr MCP tooling (per-machine)
+.chattr-agents.json

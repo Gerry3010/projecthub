@@ -1,0 +1,6 @@
+# phseed project dirs — copy to phseed-dirs.txt (gitignored) and edit, or export
+# PROJECTHUB_SEED_DIRS (os.PathListSeparator-separated) to override.
+# One absolute path per line. Blank lines and lines starting with '#' are ignored.
+
+/home/you/Projects/my-app
+/home/you/Projects/another-project

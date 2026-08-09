@@ -1,6 +1,11 @@
 // Command phseed is a throwaway dev seeder: it logs into the local Passbubble backend
 // and creates a ProjectHub project (+ a 4-tile workspace: tabs, sessions, todo, notes)
 // for each curated Claude-Code working directory. Idempotent by LocalPath.
+//
+// The dir list is personal, so it is NOT baked into this (public) source. Provide it
+// via the PROJECTHUB_SEED_DIRS env var (os.PathListSeparator-separated) or a plain-text
+// file (default ./phseed-dirs.txt, one absolute path per line, # comments allowed).
+// See phseed-dirs.example.txt for the format.
 package main
 
 import (
@@ -11,6 +16,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/google/uuid"
 
@@ -20,28 +26,29 @@ import (
 	"github.com/Gerry3010/projecthub/internal/core/store"
 )
 
-// Curated real project dirs (navigation dirs like ~/, ~/Downloads are excluded).
-var dirs = []string{
-	"/home/user/Projects/GO-Projekte/projecthub",
-	"/home/user/Projects/GO-Projekte/Password-Manager",
-	"/home/user/Projects/GO-Projekte/pipepush",
-	"/home/user/Projects/GO-Projekte/syno-abb-viewer",
-	"/home/user/Projects/Minecraft/VanillaPlusAdditions",
-	"/home/user/Projects/Minecraft/mc-model-studio",
-	"/home/user/Projects/Minecraft/minecraft-world-ai",
-	"/home/user/Projects/Minecraft/neoforge-world-switcher",
-	"/home/user/Projects/business/gh-gallery-revamped",
-	"/home/user/Projects/business/Homepage",
-	"/home/user/Projects/business/steuer-rechner",
-	"/home/user/Projects/GTK-Projekte/mission-ws",
-	"/home/user/Projects/GTK-Projekte/micdrop",
-	"/home/user/Projects/FlutterApps/sleep_app_starter",
-	"/home/user/Projects/Chattr2/chattr",
-	"/home/user/Projects/clients/Projekte/example-client",
-	"/home/user/Projects/Python-Stuff/psono-explorer",
-	"/home/user/Projects/Python-Stuff/python-tui-react",
-	"/home/user/Projects/AI-STUFF/heyclaude",
-	"/home/user/Projects/heyclaude",
+// loadDirs reads the project dirs to seed from PROJECTHUB_SEED_DIRS (if set) or from a
+// newline-separated file. Blank lines and lines starting with '#' are ignored.
+func loadDirs(file string) ([]string, error) {
+	if env := os.Getenv("PROJECTHUB_SEED_DIRS"); env != "" {
+		var dirs []string
+		for _, d := range filepath.SplitList(env) {
+			if d = strings.TrimSpace(d); d != "" {
+				dirs = append(dirs, d)
+			}
+		}
+		return dirs, nil
+	}
+	b, err := os.ReadFile(file)
+	if err != nil {
+		return nil, fmt.Errorf("set PROJECTHUB_SEED_DIRS or create %s (one absolute path per line; # comments ok): %w", file, err)
+	}
+	var dirs []string
+	for _, line := range strings.Split(string(b), "\n") {
+		if line = strings.TrimSpace(line); line != "" && !strings.HasPrefix(line, "#") {
+			dirs = append(dirs, line)
+		}
+	}
+	return dirs, nil
 }
 
 func main() {
@@ -49,7 +56,16 @@ func main() {
 	server := flag.String("server", env("PROJECTHUB_SERVER", "http://localhost:8765"), "Passbubble URL")
 	email := flag.String("email", "test@ph.local", "account email")
 	password := flag.String("password", "test1234", "account password")
+	dirsFile := flag.String("dirs", "phseed-dirs.txt", "file with project dirs (one absolute path per line); overridden by $PROJECTHUB_SEED_DIRS")
 	flag.Parse()
+
+	dirs, err := loadDirs(*dirsFile)
+	if err != nil {
+		log.Fatalf("load dirs: %v", err)
+	}
+	if len(dirs) == 0 {
+		log.Fatalf("no project dirs to seed")
+	}
 
 	ctx := context.Background()
 	st, err := login(ctx, *server, *email, *password)
