@@ -55,6 +55,60 @@ func TestProxyStripsPrefixAndForwards(t *testing.T) {
 	}
 }
 
+func TestPBTargetValidation(t *testing.T) {
+	if _, err := NewPBTarget("https://ok.example"); err != nil {
+		t.Fatalf("valid url rejected: %v", err)
+	}
+	for _, bad := range []string{"", "ftp://x", "not a url", "//no-scheme", "http://"} {
+		if _, err := NewPBTarget(bad); err == nil {
+			t.Fatalf("expected %q to be rejected", bad)
+		}
+	}
+}
+
+func TestPBTargetLiveSwap(t *testing.T) {
+	// Two upstreams; the proxy must follow the current target without a rebuild.
+	up := func(tag string) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = io.WriteString(w, tag)
+		}))
+	}
+	a, b := up("A"), up("B")
+	defer a.Close()
+	defer b.Close()
+
+	target, err := NewPBTarget(a.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := New(Config{PBTarget: target})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	get := func() string {
+		resp, err := http.Get(srv.URL + "/pb/x")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		body, _ := io.ReadAll(resp.Body)
+		return string(body)
+	}
+
+	if got := get(); got != "A" {
+		t.Fatalf("initial upstream = %q, want A", got)
+	}
+	if err := target.Set(b.URL); err != nil {
+		t.Fatal(err)
+	}
+	if got := get(); got != "B" {
+		t.Fatalf("after swap upstream = %q, want B", got)
+	}
+}
+
 func TestSecurityHeaders(t *testing.T) {
 	h, err := New(Config{PassbubbleURL: "http://localhost:1"})
 	if err != nil {

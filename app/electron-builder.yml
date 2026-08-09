@@ -1,0 +1,60 @@
+# electron-builder configuration for the ProjectHub desktop app.
+#
+# Two directory names collide with this repo's existing layout, so both defaults
+# are overridden below:
+#   - electron-builder's default output dir is "dist" — but app/dist is the tsc
+#     output (main.js/preload.js). Output goes to app/release instead.
+#   - its default buildResources dir is "build" — but <repo>/build holds the Go
+#     binaries (phd, tabhost, phmcp). Build assets live in app/build-resources.
+#
+# The packaged app ships the Go sidecar and the web assets as extraResources, i.e.
+# next to the app inside resources/. That matches electron/main.ts, which resolves
+# the sidecar at process.resourcesPath and runs it with cwd = process.resourcesPath
+# (the sidecar serves web/* relative to its working directory).
+#
+# node_modules is deliberately NOT packaged: the main and preload processes import
+# only "electron" plus node builtins, and every renderer dependency (xterm,
+# CodeMirror, markdown-it, …) is already bundled into web/shell.js by esbuild.
+
+appId: net.geraldhofbauer.projecthub
+productName: ProjectHub
+copyright: Copyright © 2026 Gerald Hofbauer
+
+directories:
+  output: release
+  buildResources: build-resources
+
+files:
+  - dist/**/*
+  - package.json
+
+extraResources:
+  - from: ../build/phd
+    to: phd
+  - from: ../build/tabhost
+    to: tabhost
+  - from: ../build/phmcp
+    to: phmcp
+  - from: ../web
+    to: web
+
+linux:
+  target:
+    - AppImage
+    - deb
+  category: Development
+  icon: build-resources/icon.png
+  synopsis: Claude-Code-zentrierter Projekt-Manager mit E2E-Verschlüsselung
+  description: >-
+    ProjectHub ist ein Claude-Code-zentrierter Projekt-Manager: getiltete
+    Workspaces mit eingebettetem Terminal, Claude-Sessions, Browser- und
+    Editor-Kacheln — Daten Ende-zu-Ende-verschlüsselt über Passbubble.
+  # Electron uses the desktop entry's name as the app_id / WM_CLASS. With
+  # syncDesktopName, electron-builder keeps StartupWMClass in sync with the
+  # desktopName declared in package.json, so the running window groups under this
+  # launcher instead of a generic "Electron" entry — hence no hand-set
+  # StartupWMClass below.
+  syncDesktopName: true
+  desktop:
+    entry:
+      Keywords: projects;claude;code;terminal;passbubble;

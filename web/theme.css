@@ -1,0 +1,130 @@
+/* Copyright (C) 2026 Gerald Hofbauer <info@geraldhofbauer.net> — AGPLv3.
+   ProjectHub design tokens — the single source of truth for the "Deck of Islands"
+   redesign. Loaded FIRST (before app.css / shell.css) so every rule there resolves
+   against these tokens. A theme is a token-override-set keyed by :root[data-theme].
+   Never hardcode a colour in app.css/shell.css — reach for a token here. */
+
+/* ── fonts (bundled, local, OFL — no CDN) ─────────────────────────────────── */
+/* Variable fonts: one file spans all weights (100–900). latin covers German
+   umlauts + ß (all < U+00FF); latin-ext is loaded only when its glyphs appear. */
+@font-face {
+  font-family: "Space Grotesk"; font-style: normal; font-weight: 300 700;
+  font-display: swap; src: url("/web/fonts/space-grotesk-latin-wght-normal.woff2") format("woff2");
+  unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+2074,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
+@font-face {
+  font-family: "Space Grotesk"; font-style: normal; font-weight: 300 700;
+  font-display: swap; src: url("/web/fonts/space-grotesk-latin-ext-wght-normal.woff2") format("woff2");
+  unicode-range: U+0100-02AF,U+0304,U+0308,U+0329,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20CF,U+2113,U+2C60-2C7F,U+A720-A7FF;
+}
+@font-face {
+  font-family: "Geist"; font-style: normal; font-weight: 100 900;
+  font-display: swap; src: url("/web/fonts/geist-latin-wght-normal.woff2") format("woff2");
+  unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+2074,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
+@font-face {
+  font-family: "Geist"; font-style: normal; font-weight: 100 900;
+  font-display: swap; src: url("/web/fonts/geist-latin-ext-wght-normal.woff2") format("woff2");
+  unicode-range: U+0100-02AF,U+0304,U+0308,U+0329,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20CF,U+2113,U+2C60-2C7F,U+A720-A7FF;
+}
+@font-face {
+  font-family: "JetBrains Mono"; font-style: normal; font-weight: 100 800;
+  font-display: swap; src: url("/web/fonts/jetbrains-mono-latin-wght-normal.woff2") format("woff2");
+  unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+2074,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
+@font-face {
+  font-family: "JetBrains Mono"; font-style: normal; font-weight: 100 800;
+  font-display: swap; src: url("/web/fonts/jetbrains-mono-latin-ext-wght-normal.woff2") format("woff2");
+  unicode-range: U+0100-02AF,U+0304,U+0308,U+0329,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20CF,U+2113,U+2C60-2C7F,U+A720-A7FF;
+}
+/* Nerd Font symbols (Powerline + icon PUA ranges only) as a per-glyph fallback so
+   terminal prompts (Starship, git glyphs, powerline segments) render instead of tofu.
+   Subset from Hack Nerd Font Mono; base latin still comes from JetBrains Mono, which
+   sits before this in the font stack. See web/fonts/CREDITS.md. */
+@font-face {
+  font-family: "PH Nerd Symbols"; font-style: normal; font-weight: normal;
+  font-display: swap; src: url("/web/fonts/nerd-symbols.woff2") format("woff2");
+}
+
+/* ── tokens · default theme = deck-dark ───────────────────────────────────── */
+:root {
+  /* graphite-deck elevation ladder (cool, layered — never flat black) */
+  --ph-deck:     #0A0C10; /* backplane behind the islands (deepest) */
+  --ph-well:     #0E1117; /* sunken wells: inputs, code, terminals */
+  --ph-panel:    #14181F; /* island surface */
+  --ph-panel-2:  #1A1F28; /* raised / hover / active row */
+  --ph-line:     #262D39; /* hairline borders */
+  --ph-rim:      rgba(255,255,255,.045); /* island top-edge highlight — the signature material */
+
+  /* ink */
+  --ph-ink:      #E8ECF3;
+  --ph-ink-2:    #9BA6B7;
+  --ph-ink-3:    #616B7C;
+
+  /* the one live signal — user-set per project; this is only the fallback */
+  --accent:      #6366f1;
+  --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
+  --accent-glow: color-mix(in srgb, var(--accent) 55%, transparent);
+
+  /* semantic */
+  --ok:   #3ECF8E;
+  --warn: #E3B341;
+  --err:  #F0665A;
+
+  /* glass defaults (opaque in deck-dark; the liquid-glass theme + the wallpaper
+     editor override these on :root at runtime — see background.go) */
+  --panel-alpha: 1;
+  --panel-blur:  0px;
+  --panel-sat:   1;
+
+  /* whole-window opacity of the deck + wallpaper layer (1 = opaque). Below 1 the
+     deck goes translucent so the desktop shows through — only visible when the
+     Electron window itself was created transparent (opt-in). Tiles keep --panel-alpha
+     so content stays readable. Set at runtime by background.go (applyBackground). */
+  --app-alpha: 1;
+
+  /* typography */
+  --font-display: "Space Grotesk", system-ui, sans-serif;
+  --font-ui:      "Geist", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono:    "JetBrains Mono", "PH Nerd Symbols", ui-monospace, "SFMono-Regular", Menlo, monospace;
+
+  /* left quick-switcher rail width (frames home + workspace) */
+  --rail-w: 56px;
+
+  /* shape + depth scale */
+  --radius-tile: 12px;
+  --radius-md:   10px;
+  --radius-sm:   7px;
+  --shadow-island: 0 6px 20px -8px rgba(0,0,0,.55), 0 2px 6px -3px rgba(0,0,0,.4);
+  --shadow-pop:    0 14px 44px rgba(0,0,0,.5);
+
+  /* ── legacy aliases: existing rules in app.css/shell.css still say --card etc.
+     Map them onto the ladder so nothing breaks; new work uses the --ph-* names. */
+  --bg:     var(--ph-deck);
+  --card:   var(--ph-panel);
+  --border: var(--ph-line);
+  --fg:     var(--ph-ink);
+  --muted:  var(--ph-ink-2);
+}
+
+/* explicit deck-dark selector so switching back to it from another theme works */
+:root[data-theme="deck-dark"] { color-scheme: dark; }
+
+/* ── theme · liquid-glass (transparent / glassy) ──────────────────────────── */
+/* Reuses the existing glass machinery: panels go translucent + blurred even with
+   no wallpaper (then the deck shows through); a wallpaper makes it sing. The
+   wallpaper editor's sliders still override --panel-alpha/blur at runtime. */
+:root[data-theme="liquid-glass"] {
+  color-scheme: dark;
+  --ph-deck:    #080A0F;
+  --ph-well:    color-mix(in srgb, #0E1117 70%, transparent);
+  --ph-panel:   #1A2130; /* lighter base so translucency reads as glass, not murk */
+  --ph-panel-2: #232C3D;
+  --ph-line:    rgba(255,255,255,.10);
+  --ph-rim:     rgba(255,255,255,.14);
+  --ph-ink-2:   #A8B2C4;
+
+  --panel-alpha: 0.55;
+  --panel-blur:  18px;
+  --panel-sat:   1.4;
+}

@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8" />
+    <title>ProjectHub Live Tabs</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif; width: 320px; margin: 0; padding: 0.75rem;
+        color: #1a1a1a; background: #fff;
+      }
+      h2 {
+        font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.03em;
+        color: #666; margin: 0.75rem 0 0.4rem; font-weight: 600;
+      }
+      h2:first-child { margin-top: 0; }
+      .group-row { display: flex; align-items: center; gap: 0.4rem; padding: 0.3rem 0; }
+      .chip { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+      .gtitle {
+        flex: 1; font-size: 0.85rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      }
+      .gcount { font-size: 0.75rem; color: #888; }
+      select { font-size: 0.78rem; max-width: 9.5rem; }
+      .dash-group { border: 1px solid #e2e2e2; border-radius: 8px; padding: 0.4rem 0.5rem; margin-bottom: 0.5rem; }
+      .dash-head { display: flex; align-items: center; gap: 0.4rem; margin-bottom: 0.3rem; }
+      .dash-head .proj { font-size: 0.7rem; color: #888; margin-left: auto; }
+      .dash-open {
+        border: 0; background: #eee; border-radius: 5px; padding: 0.15rem 0.45rem;
+        cursor: pointer; font-size: 0.75rem;
+      }
+      .dash-open:hover { background: #e0e0e0; }
+      .tab-row {
+        display: flex; align-items: center; gap: 0.4rem; padding: 0.2rem 0.2rem;
+        cursor: pointer; border-radius: 4px;
+      }
+      .tab-row:hover { background: #f2f2f2; }
+      .tab-row img { width: 14px; height: 14px; flex: none; }
+      .tab-row span {
+        font-size: 0.78rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      }
+      .muted { color: #888; font-size: 0.78rem; }
+      .status { font-size: 0.7rem; color: #888; margin-top: 0.6rem; border-top: 1px solid #eee; padding-top: 0.4rem; }
+    </style>
+  </head>
+  <body>
+    <h2>Tab-Gruppen koppeln</h2>
+    <div id="groups"><p class="muted">Lade…</p></div>
+
+    <h2>Gekoppelte Gruppen</h2>
+    <div id="dashboard"><p class="muted">Keine gekoppelten Gruppen.</p></div>
+
+    <div class="status" id="status"></div>
+    <script src="popup.js"></script>
+  </body>
+</html>

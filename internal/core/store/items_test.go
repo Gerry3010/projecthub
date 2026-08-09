@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"context"
 	"testing"
+	"time"
 
 	"github.com/Gerry3010/projecthub/internal/core/domain"
 )
@@ -26,7 +27,7 @@ import (
 func TestTabSetsPinsFiles(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
-	p, err := s.CreateProject(ctx, "Items", "")
+	p, err := s.CreateProject(ctx, "Items", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,5 +90,153 @@ func TestTabSetsPinsFiles(t *testing.T) {
 	}
 	if fs, _ := s.ListFiles(ctx, folder); len(fs) != 0 {
 		t.Fatalf("file not deleted")
+	}
+}
+
+func TestLayoutRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	p, err := s.CreateProject(ctx, "Tiling", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	refs, _ := s.ListProjects(ctx)
+	folder := refs[0].FolderID
+	_ = p
+
+	// none yet
+	if l, err := s.GetLayout(ctx, folder); err != nil || l != nil {
+		t.Fatalf("expected no layout, got %+v err=%v", l, err)
+	}
+
+	layout := domain.Layout{Version: 1, Root: &domain.LayoutNode{
+		Dir: "row", Ratio: 0.4, PaneID: "split-1",
+		A: &domain.LayoutNode{PaneID: "t1", Type: domain.TileTerminal, Params: map[string]string{"cwd": "/tmp/x"}},
+		B: &domain.LayoutNode{PaneID: "m1", Type: domain.TileMarkdown, Params: map[string]string{"path": "/tmp/x/README.md"}},
+	}}
+	id, err := s.SetLayout(ctx, folder, layout)
+	if err != nil {
+		t.Fatalf("set layout: %v", err)
+	}
+
+	got, err := s.GetLayout(ctx, folder)
+	if err != nil || got == nil {
+		t.Fatalf("get layout: %v", err)
+	}
+	if got.Val.Root == nil || got.Val.Root.Dir != "row" || got.Val.Root.A.Type != domain.TileTerminal ||
+		got.Val.Root.B.Params["path"] != "/tmp/x/README.md" {
+		t.Fatalf("layout round-trip mismatch: %+v", got.Val.Root)
+	}
+
+	// update in place keeps the same entry (one ph-layout per project)
+	layout.Root.Ratio = 0.6
+	id2, err := s.SetLayout(ctx, folder, layout)
+	if err != nil || id2 != id {
+		t.Fatalf("update should reuse entry: id=%s id2=%s err=%v", id, id2, err)
+	}
+	got2, _ := s.GetLayout(ctx, folder)
+	if got2.Val.Root.Ratio != 0.6 {
+		t.Fatalf("ratio not updated: %v", got2.Val.Root.Ratio)
+	}
+}
+
+func TestBackgroundRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	p, err := s.CreateProject(ctx, "BG", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// account default
+	if bg, err := s.Background(ctx); err != nil || bg != nil {
+		t.Fatalf("expected no account bg, got %+v err=%v", bg, err)
+	}
+	acc := &domain.Background{Type: "color", Color: "#101820", Alpha: 0.7, Blur: 12, Dim: 0.3}
+	if err := s.SetBackground(ctx, acc); err != nil {
+		t.Fatalf("set account bg: %v", err)
+	}
+	if bg, _ := s.Background(ctx); bg == nil || bg.Alpha != 0.7 || bg.Blur != 12 {
+		t.Fatalf("account bg round-trip mismatch: %+v", bg)
+	}
+
+	// per-project override mirrored into the RootIndex
+	pbg := &domain.Background{Type: "image", Image: "file:/tmp/wall.jpg", Alpha: 0.5}
+	if err := s.SetProjectBackground(ctx, p.ID, pbg); err != nil {
+		t.Fatalf("set project bg: %v", err)
+	}
+	refs, _ := s.ListProjects(ctx)
+	if refs[0].Background == nil || refs[0].Background.Image != "file:/tmp/wall.jpg" {
+		t.Fatalf("project bg mirror missing: %+v", refs[0].Background)
+	}
+}
+
+func TestTodoOrderingAndFields(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	if _, err := s.CreateProject(ctx, "Todos", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	refs, _ := s.ListProjects(ctx)
+	folder := refs[0].FolderID
+
+	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	// Legacy (Order 0): should list newest-first by CreatedAt.
+	if _, err := s.CreateTodo(ctx, folder, domain.TodoItem{Text: "old", CreatedAt: base}); err != nil {
+		t.Fatalf("create old: %v", err)
+	}
+	if _, err := s.CreateTodo(ctx, folder, domain.TodoItem{Text: "new", CreatedAt: base.Add(time.Hour)}); err != nil {
+		t.Fatalf("create new: %v", err)
+	}
+	todos, err := s.ListTodos(ctx, folder)
+	if err != nil || len(todos) != 2 {
+		t.Fatalf("list todos: %v (%d)", err, len(todos))
+	}
+	if todos[0].Val.Text != "new" || todos[1].Val.Text != "old" {
+		t.Fatalf("legacy order should be newest-first, got %q,%q", todos[0].Val.Text, todos[1].Val.Text)
+	}
+
+	// Explicit Order wins over CreatedAt: put "old" first.
+	if err := s.UpdateTodo(ctx, todos[1].ID, folder, domain.TodoItem{Text: "old", CreatedAt: base, Order: 1}); err != nil {
+		t.Fatalf("reorder old: %v", err)
+	}
+	if err := s.UpdateTodo(ctx, todos[0].ID, folder, domain.TodoItem{Text: "new", CreatedAt: base.Add(time.Hour), Order: 2}); err != nil {
+		t.Fatalf("reorder new: %v", err)
+	}
+	todos, _ = s.ListTodos(ctx, folder)
+	if todos[0].Val.Text != "old" || todos[1].Val.Text != "new" {
+		t.Fatalf("explicit order should win, got %q,%q", todos[0].Val.Text, todos[1].Val.Text)
+	}
+
+	// Deadline/reminder pointers round-trip.
+	due := base.Add(48 * time.Hour)
+	if err := s.UpdateTodo(ctx, todos[0].ID, folder, domain.TodoItem{Text: "old", CreatedAt: base, Order: 1, DueAt: &due, RemindAt: &due}); err != nil {
+		t.Fatalf("set due: %v", err)
+	}
+	todos, _ = s.ListTodos(ctx, folder)
+	if todos[0].Val.DueAt == nil || !todos[0].Val.DueAt.Equal(due) || todos[0].Val.RemindAt == nil {
+		t.Fatalf("due/remind round-trip mismatch: %+v", todos[0].Val)
+	}
+}
+
+func TestCodeSessionUpdate(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	if _, err := s.CreateProject(ctx, "Sessions", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	refs, _ := s.ListProjects(ctx)
+	folder := refs[0].FolderID
+
+	id, err := s.CreateCodeSession(ctx, folder, domain.CodeSession{SessionID: "abc", Cwd: "/tmp/x"})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if err := s.UpdateCodeSession(ctx, id, folder, domain.CodeSession{SessionID: "abc", Title: "Renamed", Cwd: "/tmp/x"}); err != nil {
+		t.Fatalf("update session: %v", err)
+	}
+	got, err := s.ListCodeSessions(ctx, folder)
+	if err != nil || len(got) != 1 || got[0].Val.Title != "Renamed" {
+		t.Fatalf("rename round-trip mismatch: %v %+v", err, got)
 	}
 }

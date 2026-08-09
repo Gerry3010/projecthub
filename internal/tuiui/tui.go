@@ -314,7 +314,7 @@ func (m Model) login() tea.Cmd {
 		if err != nil {
 			return errMsg{err}
 		}
-		api.SetToken(resp.AccessToken)
+		api.SetSession(resp)
 		st := store.New(api, keys)
 		projects, err := st.ListProjects(ctx)
 		if err != nil {
@@ -351,7 +351,7 @@ func (m Model) saveFirefoxTabs(p domain.ProjectRef) tea.Cmd {
 // stores a reference for each one not already saved (dedup by session id).
 func (m Model) saveClaudeSessions(p domain.ProjectRef) tea.Cmd {
 	st := m.store
-	cwd := filepath.Join(m.cfg.IndexRoot, p.Slug)
+	cwd := p.Cwd(m.cfg.IndexRoot)
 	return func() tea.Msg {
 		ctx := context.Background()
 		found, err := tabsession.ScanClaudeSessions(cwd)
@@ -459,7 +459,7 @@ func (m Model) loadDetail(p domain.ProjectRef) tea.Cmd {
 
 // activate performs an item's default action: restore a tab set, or open a pin.
 func (m Model) activate(it detailItem) tea.Cmd {
-	idxRoot, slug := m.cfg.IndexRoot, m.current.Slug
+	projectCwd := m.current.Cwd(m.cfg.IndexRoot)
 	return func() tea.Msg {
 		switch it.kind {
 		case domain.KindTabSet:
@@ -470,14 +470,14 @@ func (m Model) activate(it detailItem) tea.Cmd {
 		case domain.KindCodeSession:
 			cwd := it.session.Cwd
 			if cwd == "" {
-				cwd = filepath.Join(idxRoot, slug)
+				cwd = projectCwd
 			}
 			if err := local.ResumeClaudeSession(cwd, it.session.SessionID); err != nil {
 				return errMsg{err}
 			}
 			return statusMsg{"Claude-Session fortgesetzt: " + orDash(it.session.Title)}
 		case domain.KindPin:
-			abs := filepath.Join(idxRoot, slug, it.pin.RelPath)
+			abs := filepath.Join(projectCwd, it.pin.RelPath)
 			if err := local.OpenPath(abs); err != nil {
 				return errMsg{err}
 			}

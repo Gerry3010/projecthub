@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "ProjectHub Live Tabs",
+  "version": "0.1.0",
+  "description": "Meldet die aktuell offenen Tabs live an die ProjectHub-Desktop-App.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwJMQfxJ6LIcvTCaYaqzESqAQa4TwqMFiO8RZVXN27rtGfpsr/0bY6vA0TCSm8vWbReBy9oPzt8433l5OMNddwLfXroLOf+CiHEyqM23vg5qZYr7vJ8vGl7vPOgqHqntxARL9D7zoHj+yLV5p0PbE3ae+sfTTLmjYuxfQt2EgxNBWIw7aYMVOWU82H5V/EeqVpqByWZDW10jw8DydtpCaL9c8r+A02fODDWrEWoKS52iwvhqBalkyV9wWE4VTExw3aBst1hOCzqRxVj93y/R0BgvUBi0aACXcvy40c19xvE/O7OYVhGPxBg64IklxNdVg+KiwqffwlkaDwRImwwLxQwIDAQAB",
+  "permissions": ["tabs", "tabGroups", "nativeMessaging", "alarms", "storage"],
+  "background": { "service_worker": "background.js" },
+  "options_page": "options.html",
+  "action": { "default_title": "ProjectHub Live Tabs", "default_popup": "popup.html" },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

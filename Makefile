@@ -3,7 +3,7 @@
 PASSBUBBLE_URL ?= http://localhost:8080
 PORT           ?= 8090
 
-.PHONY: all wasm server run tui test vet build clean
+.PHONY: all wasm server sidecar tabhost phmcp pack run tui test vet build clean
 
 all: build
 
@@ -15,12 +15,34 @@ wasm:
 server:
 	go build -o build/server ./cmd/server
 
+## sidecar: build the Electron desktop sidecar daemon → build/phd
+sidecar:
+	go build -o build/phd ./cmd/phd
+
+## tabhost: build the browser-extension native-messaging host → build/tabhost
+tabhost:
+	go build -o build/tabhost ./cmd/tabhost
+
+## phmcp: build the MCP stdio bridge Claude Code launches → build/phmcp
+phmcp:
+	go build -o build/phmcp ./cmd/phmcp
+
+## shell: bundle the renderer island layer (xterm/markdown/webview) → web/shell.js
+shell:
+	cd app && npm run build:shell
+
 ## tui: build the TUI companion → build/tui (placeholder until implemented)
 tui:
 	go build -o build/tui ./cmd/tui
 
-## build: wasm frontend + server + tui
-build: wasm server
+## build: wasm frontend + server + sidecar + native-messaging host + MCP bridge
+build: wasm server sidecar tabhost phmcp
+
+## pack: bundle the desktop app → app/release (AppImage + .deb). Builds the Go
+## pieces first because electron-builder ships them as extraResources next to the
+## app (see app/electron-builder.yml).
+pack: wasm sidecar tabhost phmcp
+	cd app && npm run pack
 
 ## run: build the wasm frontend, then run the server (serves on $(PORT))
 run: wasm

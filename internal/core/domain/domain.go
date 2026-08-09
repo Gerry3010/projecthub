@@ -33,7 +33,10 @@
 //	    └── ph-pipepush   entry:   PipepushLink  (at most one per project)
 package domain
 
-import "time"
+import (
+	"path/filepath"
+	"time"
+)
 
 // Structural folder names (cleartext, server-visible — not user content).
 const (
@@ -49,12 +52,16 @@ const (
 	KindRoot     Kind = "ph-root"     // the RootIndex catalog (one per account, in root folder)
 	KindManifest Kind = "ph-manifest" // a project's metadata
 	KindNote     Kind = "ph-note"
+	KindTodo     Kind = "ph-todo"
 	KindTabSet   Kind = "ph-tabset"
 	KindPin      Kind = "ph-pin"
 	KindFile     Kind = "ph-file"
 
-	KindCodeSession  Kind = "ph-ccsession" // a Claude Code session reference
-	KindPipepushLink Kind = "ph-pipepush"  // link to a pipepush project (one per project)
+	KindCodeSession    Kind = "ph-ccsession" // a Claude Code session reference
+	KindPipepushLink   Kind = "ph-pipepush"  // link to a pipepush project (one per project)
+	KindRedmineLink    Kind = "ph-redmine"   // link to a Redmine instance (one per project)
+	KindLayout         Kind = "ph-layout"    // the tiling workspace layout (one per project)
+	KindPassbubbleLink Kind = "ph-pblink"    // reference to a Passbubble vault entry on the same server
 )
 
 // PassbubbleEntryType is the Passbubble `type` we use for all ProjectHub entries.
@@ -62,12 +69,89 @@ const (
 // and the encrypted payload, not in this field.
 const PassbubbleEntryType = "note"
 
+// Theming. Colors are UI-only (never sensitive), but like every payload they still
+// live inside the encrypted RootIndex/manifest, so a chosen accent stays private.
+const (
+	ColorIndigo  = "#6366f1"
+	ColorBlue    = "#3b82f6"
+	ColorCyan    = "#06b6d4"
+	ColorTeal    = "#14b8a6"
+	ColorEmerald = "#10b981"
+	ColorAmber   = "#f59e0b"
+	ColorOrange  = "#f97316"
+	ColorRed     = "#ef4444"
+	ColorPink    = "#ec4899"
+	ColorViolet  = "#a855f7"
+)
+
+// DefaultPalette is the built-in preset set offered as one-click swatches — a curated
+// spectrum (cool → warm) that reads well on the graphite deck.
+var DefaultPalette = []string{
+	ColorIndigo, ColorBlue, ColorCyan, ColorTeal, ColorEmerald,
+	ColorAmber, ColorOrange, ColorRed, ColorPink, ColorViolet,
+}
+
+// DefaultAccent is the app accent used until the user picks their own.
+const DefaultAccent = ColorIndigo
+
+// AutoColor returns a stable palette color derived from seed (typically a project
+// id), so every project gets a distinct-but-consistent default without any input.
+// Empty seed falls back to the default accent.
+func AutoColor(seed string) string {
+	if seed == "" {
+		return DefaultAccent
+	}
+	// FNV-1a over the seed, then index into the palette.
+	var h uint32 = 2166136261
+	for i := 0; i < len(seed); i++ {
+		h ^= uint32(seed[i])
+		h *= 16777619
+	}
+	return DefaultPalette[int(h%uint32(len(DefaultPalette)))]
+}
+
 // RootIndex is the decrypted payload of the single ph-root entry: a catalog of all
 // projects so the client can list them after unlocking without decrypting every
 // project's contents.
 type RootIndex struct {
 	Version  int          `json:"version"`
 	Projects []ProjectRef `json:"projects"`
+	// AccentColor is the account-level app accent (a CSS hex like "#6366f1"). Empty
+	// means "use DefaultAccent". Stored here so the choice syncs across devices.
+	AccentColor string `json:"accent_color,omitempty"`
+	// Background is the account-level default wallpaper/glass settings; a project
+	// without its own Background inherits this. Nil means the flat --bg color.
+	Background *Background `json:"background,omitempty"`
+	// SearchEngine is the account-level default search engine for browser tiles
+	// (a key like "brave"/"ddg"/"google"/"startpage"). Empty means the client
+	// default. Stored here so the choice syncs across devices via Passbubble.
+	SearchEngine string `json:"search_engine,omitempty"`
+	// HomeView is how the projects home is laid out: "grid" (default) or "list".
+	// Empty ⇒ grid. Synced across devices via the RootIndex.
+	HomeView string `json:"home_view,omitempty"`
+	// EditorTheme is the account-level default CodeMirror theme key (empty ⇒ built-in
+	// default). A project may override it (ProjectRef/Project.EditorTheme).
+	EditorTheme string `json:"editor_theme,omitempty"`
+	// Theme is the account-level UI theme key ("deck-dark" default, "liquid-glass", …).
+	// A project may override it (ProjectRef/Project.Theme).
+	Theme string `json:"theme,omitempty"`
+}
+
+// Background describes the app/project wallpaper and the glassmorphism of panels.
+// Applied as CSS variables; the image shows through translucent, blurred tiles.
+type Background struct {
+	Type  string  `json:"type,omitempty"`  // "" (flat --bg) | "color" | "image"
+	Color string  `json:"color,omitempty"` // CSS hex for Type=="color"
+	Image string  `json:"image,omitempty"` // Type=="image": "preset:<file>" (bundled wallpaper) OR a ph-file entry id (E2E, synced) OR "file:<abs path>" (local)
+	Alpha float64 `json:"alpha,omitempty"` // panel translucency 0..1 (0 ⇒ opaque default)
+	Blur  int     `json:"blur,omitempty"`  // panel backdrop-blur in px (blurs the wallpaper behind tiles)
+	Dim   float64 `json:"dim,omitempty"`   // 0..1 dark overlay over the wallpaper for readability
+	// AppAlpha is the whole-window opacity of the deck + wallpaper layer (0..1; 0 ⇒
+	// the opaque default of 1). Below 1 the deck goes translucent so the desktop /
+	// other apps show through behind ProjectHub — only visible when the Electron
+	// window itself was created transparent (opt-in, see main.ts). Tiles keep their
+	// own Alpha, so content stays readable.
+	AppAlpha float64 `json:"app_alpha,omitempty"`
 }
 
 // ProjectRef is a project's entry in the RootIndex.
@@ -76,15 +160,59 @@ type ProjectRef struct {
 	FolderID string `json:"folder_id"` // Passbubble folder id of the project folder
 	Title    string `json:"title"`
 	Slug     string `json:"slug"` // filesystem-safe; mirrors to <IndexRoot>/<slug>/
+	// LocalPath is the project's real working directory on this machine (e.g. the
+	// Claude Code cwd it was created from). When empty, the local dir falls back to
+	// the legacy <IndexRoot>/<slug> convention — see Cwd. Mirrored from Project so
+	// the list view resolves paths without decrypting every manifest. It lives in
+	// the encrypted payload, so it stays private; it is machine-specific, so multi-
+	// device path handling is future work.
+	LocalPath string `json:"local_path,omitempty"`
+	// Color is the project's accent (CSS hex, mirrored from the manifest) so the
+	// list view can tint each project without decrypting it. Empty on projects
+	// created before colors existed — see AccentColor for the fallback.
+	Color string `json:"color,omitempty"`
+	// Background mirrors the manifest's per-project wallpaper/glass override; nil ⇒
+	// inherit the account default (RootIndex.Background).
+	Background *Background `json:"background,omitempty"`
+	// EditorTheme mirrors the manifest's per-project CodeMirror theme override; empty
+	// ⇒ inherit the account default (RootIndex.EditorTheme).
+	EditorTheme string `json:"editor_theme,omitempty"`
+	// Theme mirrors the manifest's per-project UI theme override; empty ⇒ inherit the
+	// account default (RootIndex.Theme).
+	Theme string `json:"theme,omitempty"`
+}
+
+// AccentColor returns the project's accent, falling back to a stable auto color
+// derived from its id when unset (older projects, or ones never customized).
+func (r ProjectRef) AccentColor() string {
+	if r.Color != "" {
+		return r.Color
+	}
+	return AutoColor(r.ID)
+}
+
+// Cwd resolves the project's local working directory: LocalPath if set, else the
+// legacy <indexRoot>/<slug> convention. This is the single resolution both the TUI
+// and the sidecar use so old (path-less) and new projects behave consistently.
+func (r ProjectRef) Cwd(indexRoot string) string {
+	if r.LocalPath != "" {
+		return r.LocalPath
+	}
+	return filepath.Join(indexRoot, r.Slug)
 }
 
 // Project is the decrypted ph-manifest payload.
 type Project struct {
-	ID          string    `json:"id"`
-	Title       string    `json:"title"`
-	Description string    `json:"description,omitempty"`
-	Slug        string    `json:"slug"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID          string      `json:"id"`
+	Title       string      `json:"title"`
+	Description string      `json:"description,omitempty"`
+	Slug        string      `json:"slug"`
+	LocalPath   string      `json:"local_path,omitempty"` // real cwd on this machine; see ProjectRef.Cwd
+	Color       string      `json:"color,omitempty"`        // accent (CSS hex); mirrored to ProjectRef.Color
+	Background  *Background `json:"background,omitempty"`   // per-project wallpaper/glass; mirrored to ProjectRef.Background
+	EditorTheme string      `json:"editor_theme,omitempty"` // CodeMirror theme override; mirrored to ProjectRef.EditorTheme
+	Theme       string      `json:"theme,omitempty"`        // UI theme override; mirrored to ProjectRef.Theme
+	CreatedAt   time.Time   `json:"created_at"`
 }
 
 // NoteDoc is the decrypted ph-note payload.
@@ -92,6 +220,25 @@ type NoteDoc struct {
 	Title     string    `json:"title"`
 	Body      string    `json:"body"`
 	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// TodoItem is the decrypted ph-todo payload: one entry in a project's checklist.
+// Each todo is its own Passbubble entry so an item can be toggled or removed on its
+// own (mirrors ph-note). Ordered newest-first when listed.
+type TodoItem struct {
+	Text      string    `json:"text"`
+	Done      bool      `json:"done"`
+	CreatedAt time.Time `json:"created_at"`
+	DoneAt    time.Time `json:"done_at"`
+	// Order is the manual sort position (ascending). Legacy todos (created before
+	// reordering existed) default to 0, so ListTodos tie-breaks equal orders by
+	// CreatedAt — preserving the old newest-first behavior until a manual reorder
+	// assigns explicit positions.
+	Order int `json:"order,omitempty"`
+	// DueAt is the optional deadline; nil = none. RemindAt is the optional reminder
+	// time; nil = none or already fired (cleared after firing so it won't re-alert).
+	DueAt    *time.Time `json:"due_at,omitempty"`
+	RemindAt *time.Time `json:"remind_at,omitempty"`
 }
 
 // TabSet is the decrypted ph-tabset payload: a saved set of browser tabs/windows.
@@ -108,6 +255,76 @@ type Tab struct {
 	Title  string `json:"title,omitempty"`
 	Window int    `json:"window"` // window index for multi-window restore
 	Pinned bool   `json:"pinned,omitempty"`
+}
+
+// Live browser-tab wire types. These are ephemeral: never encrypted or persisted —
+// they live only in the sidecar's in-memory tabstate and are served to the WASM UI
+// over /native/tabs. Only tab groups the user has *coupled* to a project in the
+// extension popup are reported, so a browser with hundreds of tabs stays manageable.
+
+// LiveBrowserGroups is one browser's coupled tab groups, reported live by the browser
+// extension via the native-messaging host on every relevant change.
+type LiveBrowserGroups struct {
+	Browser   string         `json:"browser"` // "chrome" | "chromium" | "brave" | "edge" | "vivaldi"
+	Groups    []LiveTabGroup `json:"groups"`
+	UpdatedAt time.Time      `json:"updated_at"`
+}
+
+// LiveTabGroup is one Chrome tab group coupled to a ProjectHub project. GroupKey is a
+// stable (title-derived) key used for coupling; GroupID is the live Chrome group id
+// (session-scoped, used to focus/reopen the group).
+type LiveTabGroup struct {
+	ProjectID string    `json:"project_id"`
+	GroupKey  string    `json:"group_key"`
+	Title     string    `json:"title"`
+	Color     string    `json:"color"` // Chrome tab-group color name: grey/blue/red/…
+	GroupID   int       `json:"group_id"`
+	Browser   string    `json:"browser,omitempty"` // set by the sidecar on read, not by the extension
+	Tabs      []LiveTab `json:"tabs"`
+}
+
+// LiveTab is a single currently-open browser tab. It carries a favicon URL, the active
+// flag, and the live Chrome tab/window ids (used to focus an existing tab) — all of
+// which the persisted domain.Tab deliberately omits.
+type LiveTab struct {
+	URL        string `json:"url"`
+	Title      string `json:"title,omitempty"`
+	FavIconURL string `json:"fav_icon_url,omitempty"`
+	TabID      int    `json:"tab_id,omitempty"`
+	WindowID   int    `json:"window_id"`
+	Active     bool   `json:"active,omitempty"`
+	Pinned     bool   `json:"pinned,omitempty"`
+}
+
+// RosterEntry is one project's id+title, pushed by the unlocked WASM app into the
+// sidecar so the extension popup can list projects to couple groups to. Titles are the
+// only user content that reaches the sidecar here, over the same local channel the tab
+// URLs/titles already use; nothing is persisted.
+type RosterEntry struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+}
+
+// TabCommand is a ProjectHub → extension request (via the sidecar command queue and the
+// native-messaging host) to act on a live tab/group in the browser. Actions:
+// "focusTab" | "focusGroup" | "openGroup" | "createGroup" | "deleteGroup" | "renameGroup" |
+// "recolorGroup" | "addTab" | "removeTab".
+type TabCommand struct {
+	Browser  string   `json:"browser"`
+	Action   string   `json:"action"`
+	TabID    int      `json:"tab_id,omitempty"`
+	WindowID int      `json:"window_id,omitempty"`
+	GroupID  int      `json:"group_id,omitempty"`
+	GroupKey string   `json:"group_key,omitempty"`
+	URLs     []string `json:"urls,omitempty"` // fallback for reopening a closed group
+
+	// Title/Color/ProjectID/URL back createGroup/renameGroup/recolorGroup/addTab: Title
+	// names a new or renamed group, Color is a Chrome tab-group color name, ProjectID
+	// couples a freshly created group to a project, URL is the tab to add.
+	Title     string `json:"title,omitempty"`
+	Color     string `json:"color,omitempty"`
+	ProjectID string `json:"project_id,omitempty"`
+	URL       string `json:"url,omitempty"`
 }
 
 // PinnedItem is the decrypted ph-pin payload: a reference to a local file/dir,
@@ -130,16 +347,119 @@ type CodeSession struct {
 	LastActive time.Time `json:"last_active"`
 }
 
+// TranscriptEntry is one line of a Claude Code session transcript (~/.claude/
+// projects/<cwd>/<sessionId>.jsonl), decoded into structured content blocks.
+// Unlike CodeSession (which only tracks title/cwd/last-active for the session
+// list), this carries every message's content so a tile can render the full
+// conversation — text, thinking, tool calls/results. Never persisted: it is
+// read live off disk by the sidecar (see internal/tabsession.ParseTranscript)
+// and served to the WASM UI over /native/claude/transcript.
+type TranscriptEntry struct {
+	Role        string            `json:"role"` // "user" | "assistant"
+	Timestamp   time.Time         `json:"timestamp"`
+	IsSidechain bool              `json:"is_sidechain,omitempty"`
+	Blocks      []TranscriptBlock `json:"blocks"`
+}
+
+// TranscriptBlock is one content block within a transcript entry's message.
+// Which fields are set depends on Kind: text/thinking use Text; tool_use uses
+// ToolName+ToolInput; tool_result uses Result(+IsError); image uses ImageMIME
+// (the image bytes themselves are not carried — too large for a live view).
+type TranscriptBlock struct {
+	Kind      string `json:"kind"` // "text" | "thinking" | "tool_use" | "tool_result" | "image"
+	Text      string `json:"text,omitempty"`
+	ToolName  string `json:"tool_name,omitempty"`
+	ToolInput string `json:"tool_input,omitempty"`
+	Result    string `json:"result,omitempty"`
+	IsError   bool   `json:"is_error,omitempty"`
+	ImageMIME string `json:"image_mime,omitempty"`
+}
+
+// DirEntry is one item in a local directory listing (the file-tree tile's lazy
+// per-folder read). Read live off disk by the sidecar (GET /native/dir); never
+// persisted.
+type DirEntry struct {
+	Name  string `json:"name"`
+	IsDir bool   `json:"is_dir"`
+	Size  int64  `json:"size"`
+}
+
+// ClaudeTask is one entry from a Claude Code session's task list (the TaskCreate/
+// TodoWrite plan), read live off disk from ~/.claude/tasks/<sessionId>/<id>.json.
+// Never persisted by ProjectHub — surfaced read-only so a session's current plan is
+// scannable in the Claude tile.
+type ClaudeTask struct {
+	ID          string `json:"id"`
+	Subject     string `json:"subject"`
+	Description string `json:"description,omitempty"`
+	ActiveForm  string `json:"active_form,omitempty"`
+	Status      string `json:"status"` // "pending" | "in_progress" | "completed"
+}
+
+// PassbubbleLink is the decrypted ph-pblink payload: a reference from a ProjectHub
+// project to one of the user's OTHER Passbubble vault entries on the same server
+// (a login, note, etc. created in the Passbubble app itself). Only the reference is
+// stored here — the linked entry's secret content is fetched and decrypted on demand
+// (Store.GetForeignEntry), never copied into ProjectHub's storage.
+type PassbubbleLink struct {
+	EntryID   string    `json:"entry_id"`   // the linked Passbubble entry's id
+	Title     string    `json:"title"`      // its name, mirrored for display without a fetch
+	EntryType string    `json:"entry_type"` // "login" | "note" | … (Passbubble entry type)
+	Folder    string    `json:"folder,omitempty"`
+	LinkedAt  time.Time `json:"linked_at"`
+}
+
 // PipepushLink is the decrypted ph-pipepush payload: it couples a ProjectHub
 // project to a pipepush project plus a webhook token. The token is secret but,
 // like every payload, encrypted at rest in Passbubble. At most one per project.
+//
+// Email/Password are the user's pipepush account credentials, needed to read
+// runs (the pp_… Token below only authorizes the outbound webhook, not reads —
+// see internal/pipepush's package doc). Like everything here they're encrypted
+// at rest in the vault; ProjectHub only sends them to the sidecar's pipepush
+// proxy (internal/nativeserver) which relays them straight to the pipepush
+// server for POST /api/auth/login and never persists them.
 type PipepushLink struct {
 	BaseURL   string    `json:"base_url"`           // e.g. https://pipepush.geraldhofbauer.net
 	ProjectID string    `json:"project_id"`         // pipepush project UUID
 	Label     string    `json:"label,omitempty"`    // human label for the link
 	Token     string    `json:"token,omitempty"`    // pp_… notification token for POST /api/webhook
 	Pipeline  string    `json:"pipeline,omitempty"` // routing name (project-scoped tokens fan out by pipeline)
+	Email     string    `json:"email,omitempty"`    // pipepush account email, for reading runs
+	Password  string    `json:"password,omitempty"` // pipepush account password, for reading runs
 	LinkedAt  time.Time `json:"linked_at"`
+}
+
+// RedmineLink is the decrypted ph-redmine payload: it couples a ProjectHub project to
+// a Redmine instance. The API key is a credential but, like every payload here, is
+// encrypted at rest in Passbubble; ProjectHub only sends it to the sidecar's
+// same-origin Redmine relay (internal/nativeserver), which forwards it upstream as
+// X-Redmine-API-Key and never persists it. At most one per project.
+type RedmineLink struct {
+	BaseURL   string    `json:"base_url"`             // e.g. https://redmine.example.com
+	APIKey    string    `json:"api_key,omitempty"`   // Redmine REST API key (account setting)
+	ProjectID string    `json:"project_id,omitempty"` // optional: Redmine project id/identifier filter
+	Label     string    `json:"label,omitempty"`
+	LinkedAt  time.Time `json:"linked_at"`
+}
+
+// RedmineNamed is a nested {id,name} object as Redmine returns for status/priority/
+// tracker; ProjectHub only needs the display name.
+type RedmineNamed struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+}
+
+// RedmineIssue is a minimal projection of a Redmine issue from GET /issues.json — just
+// what the tile shows.
+type RedmineIssue struct {
+	ID        int          `json:"id"`
+	Subject   string       `json:"subject"`
+	Status    RedmineNamed `json:"status"`
+	Priority  RedmineNamed `json:"priority"`
+	Tracker   RedmineNamed `json:"tracker"`
+	DoneRatio int          `json:"done_ratio"`
+	UpdatedOn string       `json:"updated_on"`
 }
 
 // FileBlob is the decrypted ph-file payload: an uploaded file stored inline. Keep
@@ -151,3 +471,51 @@ type FileBlob struct {
 	Size     int64  `json:"size"`
 	Bytes    []byte `json:"bytes"` // encoding/json renders []byte as base64
 }
+
+// TileType identifies a workspace tile's content. terminal/browser/markdown are
+// "island" tiles hosted by JS (web/shell.js) as foreign DOM that survives relayout;
+// notes/files/sessions are native go-app views.
+type TileType string
+
+const (
+	TileTerminal   TileType = "terminal"
+	TileBrowser    TileType = "browser"
+	TileMarkdown   TileType = "markdown"
+	TileEditor     TileType = "editor"   // in-tile CodeMirror file editor (JS island)
+	TileFileTree   TileType = "filetree" // local (on-disk) file browser
+	TileNotes      TileType = "notes"
+	TileTodo       TileType = "todo"
+	TileFiles      TileType = "files"
+	TileSessions   TileType = "sessions"
+	TileTabs       TileType = "tabs"       // live open browser tabs, fed by the browser extension
+	TileClaude     TileType = "claude"     // Claude Code chat overview + transcript viewer/starter
+	TilePipepush   TileType = "pipepush"   // pipepush CI run overview + detail
+	TilePassbubble TileType = "passbubble" // links to the user's Passbubble vault entries
+	TileRedmine    TileType = "redmine"    // Redmine issue overview (+ inline config)
+)
+
+// Layout is the decrypted ph-layout payload: a project's Warp-style tiling workspace,
+// persisted per project so it reopens exactly as left. Root is nil for an empty
+// workspace. One ph-layout entry per project folder.
+type Layout struct {
+	Version int         `json:"version"`
+	Root    *LayoutNode `json:"root,omitempty"`
+}
+
+// LayoutNode is a node in the binary split tree. It is EITHER a split (Dir set, with
+// children A and B and a Ratio for A's share) OR a leaf tile (PaneID + Type set).
+type LayoutNode struct {
+	// split node
+	Dir   string      `json:"dir,omitempty"`   // "row" (side by side) | "col" (stacked); empty ⇒ leaf
+	Ratio float64     `json:"ratio,omitempty"` // A's fraction of the split (0.05–0.95); 0 ⇒ 0.5
+	A     *LayoutNode `json:"a,omitempty"`
+	B     *LayoutNode `json:"b,omitempty"`
+
+	// leaf node
+	PaneID string            `json:"pane_id,omitempty"` // stable per-instance id (uuid)
+	Type   TileType          `json:"type,omitempty"`
+	Params map[string]string `json:"params,omitempty"` // instance state: cwd, session_id, url, path, note_id, …
+}
+
+// IsLeaf reports whether the node is a tile (as opposed to a split).
+func (n *LayoutNode) IsLeaf() bool { return n != nil && n.Dir == "" }

@@ -1,0 +1,514 @@
+/* Copyright (C) 2026 Gerald Hofbauer <info@geraldhofbauer.net> — AGPLv3.
+   Tiling-workspace + island styling, bundled into web/shell.css. Kept out of
+   app.css so it doesn't collide with the parallel theming edits there. */
+
+/* ── workspace shell ─────────────────────────────────────────────────────── */
+.ph-workspace {
+  position: fixed;
+  inset: 0;
+  left: var(--rail-w, 0); /* clear the left quick-switcher rail */
+  display: flex;
+  flex-direction: column;
+  /* --app-alpha < 1 lets the deck go translucent (window transparency opt-in) so the
+     desktop shows through the gaps between islands; tiles keep their own alpha. */
+  background: color-mix(in srgb, var(--bg) calc(var(--app-alpha, 1) * 100%), transparent);
+  color: var(--fg);
+}
+/* wallpaper layer: color or image, with an optional dark dim overlay. Fades with
+   --app-alpha too, so "window opacity" dims the wallpaper together with the deck. */
+.ph-ws-wallpaper {
+  position: absolute; inset: 0; z-index: 0;
+  pointer-events: none; /* purely decorative — must never intercept clicks */
+  opacity: var(--app-alpha, 1);
+  background-color: var(--bg-color, transparent);
+  background-image: var(--bg-image, none);
+  background-size: cover; background-position: center; background-repeat: no-repeat;
+}
+.ph-ws-wallpaper::after {
+  content: ""; position: absolute; inset: 0;
+  background: rgba(0, 0, 0, var(--bg-dim, 0));
+}
+.ph-ws-body { position: relative; z-index: 1; }
+/* toolbar must sit ABOVE the body so its dropdown menu isn't covered by tiles */
+.ph-ws-toolbar { position: relative; z-index: 10; }
+
+/* chrome (bars/menus/panels) is not text-selectable; content areas stay selectable */
+.ph-ws-toolbar, .ph-tile-bar, .ph-menu, .ph-appr, .ph-appr-head, .ph-island-bar {
+  user-select: none; -webkit-user-select: none;
+}
+.ph-island-input, .ph-appr input, .ph-appr textarea, .ph-tile-body, .ph-tilecontent {
+  user-select: text; -webkit-user-select: text;
+}
+
+/* drag drop-zone preview: a translucent accent rectangle over the target half/edge */
+.ph-drop-hint {
+  position: fixed; z-index: 9999; pointer-events: none;
+  background: color-mix(in srgb, var(--accent) 26%, transparent);
+  border: 2px solid var(--accent); border-radius: 8px;
+  box-shadow: 0 0 0 1px rgba(0,0,0,0.3) inset;
+}
+
+/* toolbar chrome */
+.ph-add { position: relative; }
+/* full-viewport transparent catcher that closes an open menu on outside click.
+   z-index sits just below .ph-menu (20) so the menu items stay clickable. */
+.ph-backdrop { position: fixed; inset: 0; z-index: 19; background: transparent; }
+.ph-menu {
+  position: absolute; top: 2.4rem; right: 0; z-index: 20; min-width: 190px;
+  background: color-mix(in srgb, var(--ph-panel-2) 97%, transparent);
+  border: 1px solid var(--ph-line); border-radius: var(--radius-md);
+  padding: 0.3rem; display: flex; flex-direction: column;
+  box-shadow: var(--shadow-pop), inset 0 1px 0 var(--ph-rim);
+  -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+}
+.ph-menu-item {
+  background: none; border: 0; color: var(--ph-ink); text-align: left;
+  font-family: inherit; padding: 0.45rem 0.6rem; border-radius: var(--radius-sm);
+  cursor: pointer; font-size: 0.88rem;
+}
+.ph-menu-item:hover { background: var(--ph-panel); color: var(--ph-ink); }
+.ph-empty {
+  display: grid; place-items: center; height: 100%; color: var(--ph-ink-3);
+  font-family: var(--font-mono); font-size: 0.82rem; letter-spacing: 0.02em;
+}
+/* tile ⋯ overflow menu — a workspace-root popover anchored at the cursor, opening
+   down-left so a right-edge tile button keeps it on-screen. */
+.ph-tile-menu {
+  position: fixed; top: auto; right: auto; z-index: 62;
+  transform: translate(-100%, 6px);
+}
+.ph-menu-item { display: flex; align-items: center; gap: 0.55rem; }
+.ph-menu-icon { display: inline-flex; align-items: center; justify-content: center; width: 1.2em; color: var(--ph-ink-2); }
+.ph-menu-item-danger { color: var(--err); }
+.ph-menu-item-danger:hover { background: color-mix(in srgb, var(--err) 16%, transparent); }
+/* file-tree right-click menu: fixed at the cursor. Defined here (shell.css loads
+   last) so it beats the generic .ph-menu absolute rule; the tile no longer traps
+   fixed positioning (glass moved to .ph-tile::before), so it anchors to the viewport. */
+.ph-ctxmenu {
+  position: fixed; top: auto; right: auto; left: auto; bottom: auto;
+  transform: none; z-index: 62; min-width: 190px;
+}
+
+/* code editor tile (CodeMirror island) */
+.ph-editor { display: flex; flex-direction: column; height: 100%; min-height: 0; background: var(--bg); }
+.ph-editor-bar { flex: 0 0 auto; display: flex; align-items: center; gap: 0.35rem; padding: 0.3rem; border-bottom: 1px solid var(--border); }
+.ph-editor-path { flex: 1; min-width: 0; }
+.ph-editor-dirty { flex: 0 0 auto; width: 0.9rem; text-align: center; color: var(--accent, #6d8bff); }
+.ph-editor-btn { flex: 0 0 auto; background: var(--bg); border: 1px solid var(--border); color: var(--fg); border-radius: 6px; padding: 0.3rem 0.55rem; cursor: pointer; font-size: 0.8rem; }
+.ph-editor-btn:hover { border-color: var(--accent, #6d8bff); }
+.ph-editor-theme, .ph-editor-scope { flex: 0 0 auto; background: var(--bg); border: 1px solid var(--border); color: var(--fg); border-radius: 6px; padding: 0.25rem 0.3rem; font-size: 0.78rem; cursor: pointer; }
+.ph-editor-host { flex: 1; min-height: 0; overflow: hidden; }
+.ph-editor-host .cm-editor { height: 100%; }
+.ph-editor-host .cm-scroller { overflow: auto; }
+.ph-tilecontent { height: 100%; overflow: auto; padding: 0.6rem; }
+.ph-island-wrap { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.ph-island-bar { flex: 0 0 auto; padding: 0.25rem; border-bottom: 1px solid var(--border); }
+.ph-island-input {
+  width: 100%; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 6px; color: var(--fg); padding: 0.3rem 0.5rem; font-size: 0.85rem;
+}
+.ph-island-wrap .ph-island { flex: 1; min-height: 0; position: relative; }
+
+/* live browser-tabs tile */
+.ph-tabgroup { margin-bottom: 0.6rem; }
+.ph-tabgroup-head {
+  display: flex; align-items: center; gap: 0.4rem;
+  margin: 0.25rem 0 0.4rem; font-size: 0.85rem;
+}
+.ph-tabgroup-head .ph-muted { margin-left: auto; font-size: 0.8rem; }
+.ph-tabgroup-head .ph-tile-btn { padding: 0.1rem 0.4rem; font-size: 0.85rem; }
+.ph-browser-icon { display: block; flex: none; }
+.ph-group-chip {
+  width: 9px; height: 9px; border-radius: 50%; flex: none; display: inline-block;
+}
+.ph-tabgroup .ph-list { gap: 0.25rem; }
+.ph-tabitem {
+  cursor: pointer; gap: 0.5rem; justify-content: flex-start;
+  padding: 0.4rem 0.55rem;
+}
+.ph-tabitem:hover { border-color: var(--accent, #6d8bff); }
+.ph-tab-active { border-color: var(--accent, #6d8bff); }
+.ph-tab-favicon {
+  width: 16px; height: 16px; flex: none; border-radius: 3px; object-fit: contain;
+}
+.ph-tab-favicon-fallback {
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 12px; line-height: 16px;
+}
+.ph-tabitem .ph-suggest-info { min-width: 0; flex: 1; }
+.ph-tabitem .ph-title {
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 0.85rem;
+}
+.ph-taburl {
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  max-width: 100%; font-size: 0.78rem;
+}
+.ph-tabpin { flex: none; font-size: 0.75rem; }
+
+.ph-tabs-head { display: flex; margin-bottom: 0.5rem; }
+.ph-newgroup-form {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem;
+  margin: 0 0 0.7rem; padding: 0.5rem; background: var(--card);
+  border: 1px solid var(--border); border-radius: 8px;
+}
+.ph-newgroup-form .ph-island-input { width: auto; flex: 1 1 8rem; }
+.ph-color-select { flex: 0 0 auto; width: auto; max-width: 6.5rem; }
+.ph-tabgroup-head .ph-tile-btn-danger:hover { border-color: #ea4335; color: #ea4335; }
+.ph-inline-edit { display: flex; align-items: center; gap: 0.3rem; margin: 0 0 0.4rem; }
+.ph-inline-edit .ph-island-input { flex: 1; }
+.ph-tabitem .ph-tab-remove {
+  flex: none; margin-left: auto; padding: 0.05rem 0.4rem; font-size: 0.9rem;
+  opacity: 0; transition: opacity 0.1s;
+}
+.ph-tabitem:hover .ph-tab-remove { opacity: 1; }
+
+/* Claude tile: session overview (top strip) + transcript detail (scrolls) + a
+   sticky prompt bar at the bottom that starts a real Claude terminal session. */
+.ph-claude { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.ph-cc-overview {
+  flex: 0 0 auto; max-height: 8rem; overflow-y: auto;
+  border-bottom: 1px solid var(--border); margin-bottom: 0.5rem; padding-bottom: 0.4rem;
+}
+.ph-cc-session { cursor: pointer; }
+.ph-cc-session:hover { border-color: var(--accent, #6d8bff); }
+.ph-cc-session-active { border-color: var(--accent, #6d8bff); background: var(--border); }
+.ph-cc-detail { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 0.6rem; }
+/* session task list (Claude Code plan, read-only checklist) */
+.ph-cc-tasks { border: 1px solid var(--border); border-radius: 8px; padding: 0.4rem 0.55rem; background: color-mix(in srgb, var(--accent, #6d8bff) 6%, transparent); }
+.ph-cc-tasks-head { display: flex; align-items: center; gap: 0.4rem; font-size: 0.82rem; font-weight: 600; margin-bottom: 0.35rem; }
+.ph-cc-tasklist { gap: 0.25rem; }
+.ph-cc-taskitem { display: flex; align-items: flex-start; gap: 0.45rem; font-size: 0.85rem; line-height: 1.4; padding: 0.1rem 0; border: 0; }
+.ph-cc-task-icon { flex: none; }
+.ph-cc-task-completed .ph-cc-task-text { text-decoration: line-through; color: var(--muted); }
+.ph-cc-task-in_progress .ph-cc-task-text { font-weight: 600; }
+.ph-cc-msg { padding: 0.4rem 0.55rem; border: 1px solid var(--border); border-radius: 8px; }
+.ph-cc-role-user { background: color-mix(in srgb, var(--accent, #6d8bff) 8%, transparent); }
+.ph-cc-msghead { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.3rem; }
+.ph-cc-role { font-weight: 600; font-size: 0.82rem; }
+.ph-cc-text { white-space: pre-wrap; word-break: break-word; font-size: 0.88rem; line-height: 1.5; }
+.ph-cc-think {
+  margin: 0.3rem 0; padding: 0.3rem 0.5rem; border-radius: 6px;
+  background: color-mix(in srgb, var(--fg) 6%, transparent); font-size: 0.82rem;
+}
+.ph-cc-think-head {
+  background: none; border: 0; color: var(--muted); cursor: pointer;
+  padding: 0; font-size: 0.82rem; text-align: left;
+}
+.ph-cc-think-body { white-space: pre-wrap; word-break: break-word; color: var(--muted); margin-top: 0.3rem; }
+.ph-cc-tool, .ph-cc-result {
+  margin: 0.3rem 0; border-radius: 6px; border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
+}
+.ph-cc-tool-head, .ph-cc-result-head { padding: 0.25rem 0.5rem; font-size: 0.8rem; color: var(--muted); }
+.ph-cc-tool-input, .ph-cc-result-body {
+  margin: 0; padding: 0.5rem; font-size: 0.78rem; overflow: auto; max-height: 14rem;
+  white-space: pre-wrap; word-break: break-word;
+}
+.ph-cc-result-err { border-color: #ea4335; }
+.ph-cc-result-err .ph-cc-result-head { color: #ea4335; }
+.ph-cc-image { display: inline-block; font-size: 0.82rem; color: var(--muted); margin: 0.2rem 0; }
+.ph-cc-input {
+  flex: 0 0 auto; display: flex; gap: 0.4rem; align-items: flex-end;
+  padding-top: 0.5rem; margin-top: 0.4rem; border-top: 1px solid var(--border);
+}
+.ph-cc-input textarea.ph-island-input { flex: 1; min-height: 2.4rem; resize: vertical; }
+/* embedded sidebar chat: stacked actions row + input + send button (no terminal) */
+.ph-cc-input-embedded { flex-direction: column; align-items: stretch; gap: 0.4rem; }
+.ph-cc-input-actions { display: flex; align-items: center; gap: 0.6rem; min-height: 1.2rem; }
+.ph-cc-input-actions .ph-link { padding: 0; }
+.ph-cc-running { font-size: 0.78rem; color: var(--accent); }
+@keyframes ph-cc-pulse { 0%,100% { opacity: 0.45; } 50% { opacity: 1; } }
+.ph-cc-running { animation: ph-cc-pulse 1.2s ease-in-out infinite; }
+
+/* Pipepush tile: run overview (top strip, newest first) + decrypted run detail. */
+.ph-pp { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.ph-pp-overview {
+  flex: 0 0 auto; max-height: 10rem; overflow-y: auto;
+  border-bottom: 1px solid var(--border); margin-bottom: 0.5rem; padding-bottom: 0.4rem;
+}
+.ph-pp-run { cursor: pointer; gap: 0.5rem; }
+.ph-pp-run:hover { border-color: var(--accent, #6d8bff); }
+.ph-pp-run-active { border-color: var(--accent, #6d8bff); background: var(--border); }
+.ph-pp-status { flex: none; font-size: 1rem; }
+.ph-pp-detail { flex: 1; min-height: 0; overflow-y: auto; }
+.ph-pp-field { margin: 0 0 0.4rem; font-size: 0.88rem; }
+.ph-pp-logs {
+  margin: 0.3rem 0 0; padding: 0.6rem; border-radius: 8px; border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+  font-size: 0.78rem; white-space: pre-wrap; word-break: break-word; overflow: auto; max-height: 20rem;
+}
+
+/* notifications (in-app toasts) */
+.ph-toasts {
+  position: fixed; top: 0.8rem; right: 0.8rem; z-index: 9999;
+  display: flex; flex-direction: column; gap: 0.5rem;
+  max-width: min(360px, calc(100vw - 1.6rem)); pointer-events: none;
+}
+.ph-toast {
+  pointer-events: auto; cursor: pointer;
+  background: color-mix(in srgb, var(--ph-panel-2, #1b1e28) 96%, transparent);
+  border: 1px solid var(--ph-line, var(--border)); border-radius: var(--radius-md, 12px);
+  padding: 0.6rem 0.75rem; color: var(--fg);
+  box-shadow: var(--shadow-pop, 0 8px 30px rgba(0,0,0,0.35)), inset 0 1px 0 var(--ph-rim, transparent);
+  -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+  animation: ph-toast-in 0.22s ease-out;
+}
+.ph-toast-title { font-weight: 600; font-size: 0.86rem; }
+.ph-toast-body { margin-top: 0.15rem; font-size: 0.8rem; color: var(--muted); word-break: break-word; }
+.ph-toast-out { opacity: 0; transform: translateX(12px); transition: opacity 0.3s, transform 0.3s; }
+@keyframes ph-toast-in { from { opacity: 0; transform: translateX(12px); } to { opacity: 1; transform: none; } }
+
+/* redmine tile */
+.ph-redmine-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 0.5rem;
+  margin-bottom: 0.4rem; font-size: 0.8rem;
+}
+.ph-redmine-issue { cursor: pointer; gap: 0.5rem; }
+.ph-redmine-issue:hover { border-color: var(--accent, #6d8bff); }
+.ph-redmine-id { flex: none; font-variant-numeric: tabular-nums; color: var(--muted); font-size: 0.8rem; }
+.ph-redmine-config { display: flex; flex-direction: column; gap: 0.5rem; }
+.ph-redmine-config .ph-input {
+  width: 100%; padding: 0.5rem 0.6rem; border-radius: 8px;
+  border: 1px solid var(--border); background: color-mix(in srgb, var(--fg) 5%, transparent);
+  color: var(--fg); font-size: 0.85rem;
+}
+.ph-redmine-actions { display: flex; align-items: center; gap: 0.6rem; }
+
+/* appearance / background panel */
+.ph-appr {
+  position: absolute; top: 3rem; right: 0.6rem; z-index: 30;
+  width: 300px; max-width: calc(100vw - 1.2rem);
+  background: color-mix(in srgb, var(--ph-panel-2) 96%, transparent);
+  border: 1px solid var(--ph-line); border-radius: var(--radius-md);
+  padding: 0.8rem; display: flex; flex-direction: column; gap: 0.45rem;
+  -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+  box-shadow: var(--shadow-pop), inset 0 1px 0 var(--ph-rim);
+}
+.ph-appr-head { display: flex; align-items: center; gap: 0.4rem; }
+.ph-appr-lbl { font-size: 0.78rem; color: var(--muted); margin: 0.25rem 0 0; }
+.ph-appr-slider { max-width: 100%; }
+.ph-appr-slider input[type="range"] {
+  width: 100%; box-sizing: border-box; display: block; margin: 0.3rem 0 0; height: 4px;
+  -webkit-appearance: none; appearance: none; background: var(--ph-line);
+  border-radius: 3px; cursor: pointer;
+}
+.ph-appr-slider input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none; width: 15px; height: 15px; border-radius: 50%;
+  background: var(--accent); border: 2px solid var(--ph-panel-2); cursor: pointer;
+}
+.ph-appr-slider input[type="range"]::-moz-range-thumb {
+  width: 13px; height: 13px; border-radius: 50%; border: 2px solid var(--ph-panel-2);
+  background: var(--accent); cursor: pointer;
+}
+.ph-appr-hint { font-size: 0.74rem; margin: 0.2rem 0 0; }
+.ph-scope-btn {
+  flex: 1; background: var(--bg); color: var(--fg);
+  border: 1px solid var(--border); border-radius: 7px; padding: 0.35rem; cursor: pointer; font-size: 0.82rem;
+}
+.ph-scope-btn.ph-scope-on { border-color: var(--accent); color: var(--accent); }
+.ph-ws-toolbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.7rem;
+  border-bottom: 1px solid var(--ph-line);
+  background: color-mix(in srgb, var(--ph-panel) 82%, transparent);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+}
+.ph-ws-toolbar .ph-spacer { flex: 1; }
+/* project name in the workspace toolbar wears the display face */
+.ph-ws-toolbar .ph-tile-title {
+  font-family: var(--font-display); font-weight: 600; font-size: 0.95rem;
+  letter-spacing: 0.01em; color: var(--ph-ink);
+}
+.ph-ws-body { flex: 1; min-height: 0; position: relative; }
+
+/* ── split tree ──────────────────────────────────────────────────────────── */
+.ph-split { display: flex; width: 100%; height: 100%; min-width: 0; min-height: 0; }
+.ph-split[data-dir="col"] { flex-direction: column; }
+.ph-split-a { flex: var(--r, 0.5) 1 0; min-width: 0; min-height: 0; display: flex; }
+.ph-split-b { flex: calc(1 - var(--r, 0.5)) 1 0; min-width: 0; min-height: 0; display: flex; }
+.ph-split-a > *, .ph-split-b > * { flex: 1; min-width: 0; min-height: 0; }
+
+/* divider is mostly transparent so the deck shows between islands; it only tints
+   on hover. The tiles' own 6px margins carry the visible separation. */
+.ph-divider {
+  flex: 0 0 6px;
+  background: transparent;
+  cursor: col-resize;
+  transition: background 0.12s;
+}
+.ph-split[data-dir="col"] > .ph-divider { cursor: row-resize; }
+.ph-divider:hover { background: color-mix(in srgb, var(--accent) 26%, transparent); }
+body.ph-resizing { cursor: grabbing; user-select: none; }
+
+/* ── tile ────────────────────────────────────────────────────────────────── */
+.ph-tile {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  margin: 6px;
+  border: 1px solid var(--ph-line);
+  border-radius: var(--radius-tile);
+  overflow: hidden;
+  background: transparent;
+  box-shadow: var(--shadow-island), inset 0 1px 0 var(--ph-rim);
+  transition: box-shadow .14s ease, border-color .14s ease;
+}
+/* Glass lives on a background LAYER, not on .ph-tile itself — so the tile never
+   becomes a containing block and in-tile position:fixed menus (file-tree context
+   menu) escape to the viewport instead of being clipped by the tile. */
+.ph-tile::before {
+  content: ""; position: absolute; inset: 0; z-index: -1; border-radius: inherit;
+  background: color-mix(in srgb, var(--ph-panel) calc(var(--panel-alpha, 1) * 100%), transparent);
+  -webkit-backdrop-filter: blur(var(--panel-blur, 0px)) saturate(var(--panel-sat, 1));
+  backdrop-filter: blur(var(--panel-blur, 0px)) saturate(var(--panel-sat, 1));
+}
+/* focused island breathes an accent glow instead of a hard border swap */
+.ph-tile.ph-tile-focus {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--ph-line));
+  box-shadow: var(--shadow-island), inset 0 1px 0 var(--ph-rim),
+              0 0 0 1px var(--accent), 0 0 26px -7px var(--accent-glow);
+}
+.ph-tile-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.3rem 0.55rem;
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  letter-spacing: 0.01em;
+  color: var(--ph-ink-2);
+  background: color-mix(in srgb, var(--ph-panel-2) 45%, transparent);
+  border-bottom: 1px solid var(--ph-line);
+  cursor: grab;
+  user-select: none;
+}
+/* type/accent dot at the head of every tile bar — the project signal, quietly */
+.ph-tile-dot {
+  width: 7px; height: 7px; flex: none; border-radius: 50%;
+  background: var(--accent); box-shadow: 0 0 7px -1px var(--accent);
+}
+.ph-tile-bar .ph-tile-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ph-ink); }
+.ph-tile-btn {
+  background: none; border: 0; color: var(--ph-ink-2); cursor: pointer;
+  padding: 0.15rem 0.35rem; font-size: 0.9rem; line-height: 1; border-radius: var(--radius-sm);
+  transition: color .12s, background .12s;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.ph-tile-btn-lg { padding: 0.2rem 0.4rem; }
+.ph-tile-btn:hover { color: var(--ph-ink); background: var(--ph-panel-2); }
+.ph-tile-btn.ph-on { color: var(--accent); }
+.ph-tile-body { flex: 1; min-height: 0; position: relative; overflow: hidden; }
+
+/* ── drag-drop drop zones ─────────────────────────────────────────────────── */
+.ph-tile.ph-drag-over::after {
+  content: "";
+  position: absolute; inset: 0;
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  pointer-events: none;
+}
+
+/* ── islands ─────────────────────────────────────────────────────────────── */
+.ph-island, .ph-island-inner { width: 100%; height: 100%; min-width: 0; min-height: 0; }
+.ph-island-inner { position: absolute; inset: 0; }
+
+/* ── browser tile (in-tile tabs + toolbar + statusbar) ───────────────────── */
+.ph-browser { display: flex; flex-direction: column; background: var(--bg); }
+
+.ph-browser-tabs {
+  flex: 0 0 auto; display: flex; align-items: stretch; gap: 2px;
+  padding: 3px 3px 0; overflow-x: auto; scrollbar-width: thin;
+  border-bottom: 1px solid var(--border);
+}
+.ph-browser-tabs.single { display: none; } /* stay "light" with a single tab */
+.ph-browser-tab {
+  display: flex; align-items: center; gap: 0.35rem; max-width: 200px;
+  padding: 0.28rem 0.5rem; border: 1px solid var(--border); border-bottom: 0;
+  border-radius: 7px 7px 0 0; background: color-mix(in srgb, var(--fg) 5%, transparent);
+  color: var(--muted); font-size: 0.8rem; cursor: pointer; user-select: none;
+}
+.ph-browser-tab.active { background: var(--panel, var(--bg)); color: var(--fg); }
+.ph-browser-fav { width: 14px; height: 14px; flex: 0 0 auto; border-radius: 2px; }
+.ph-browser-tab-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ph-browser-tab-close, .ph-browser-tab-new {
+  flex: 0 0 auto; background: none; border: 0; color: var(--muted);
+  cursor: pointer; line-height: 1; border-radius: 4px; padding: 0.1rem 0.25rem;
+}
+.ph-browser-tab-close:hover, .ph-browser-tab-new:hover { background: var(--border); color: var(--fg); }
+.ph-browser-tab-new { align-self: center; font-size: 1rem; }
+
+.ph-browser-toolbar {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 0.25rem;
+  padding: 0.3rem; border-bottom: 1px solid var(--border);
+}
+.ph-browser-btn {
+  flex: 0 0 auto; background: none; border: 1px solid transparent; color: var(--fg);
+  border-radius: 6px; padding: 0.25rem 0.45rem; cursor: pointer; font-size: 0.9rem; line-height: 1;
+}
+.ph-browser-btn:hover { background: var(--border); }
+.ph-browser-btn:disabled { opacity: 0.35; cursor: default; }
+.ph-browser-btn:disabled:hover { background: none; }
+.ph-browser-url {
+  flex: 1; min-width: 0; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 6px; color: var(--fg); padding: 0.3rem 0.55rem; font-size: 0.85rem;
+}
+.ph-browser-engine {
+  flex: 0 0 auto; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 6px; color: var(--fg); padding: 0.25rem 0.35rem; font-size: 0.78rem; cursor: pointer;
+}
+
+.ph-browser-find {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 0.4rem;
+  padding: 0.3rem; border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg));
+}
+.ph-browser-find-input {
+  flex: 1; min-width: 0; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 6px; color: var(--fg); padding: 0.25rem 0.5rem; font-size: 0.85rem;
+}
+.ph-browser-find-count { flex: 0 0 auto; color: var(--muted); font-size: 0.8rem; min-width: 2.5rem; text-align: right; }
+
+.ph-browser-view { position: relative; flex: 1; min-height: 0; }
+/* <webview> defaults to display:inline-flex !important; the positioned wrapper +
+   absolute fill is the reliable way to make it fill the slot. */
+.ph-browser-view webview { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+
+.ph-browser-status {
+  flex: 0 0 auto; height: 1.4rem; padding: 0 0.5rem; display: flex; align-items: center;
+  border-top: 1px solid var(--border); color: var(--muted); font-size: 0.75rem;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+.ph-browser-error {
+  position: absolute; inset: 0; display: grid; place-items: center; text-align: center;
+  padding: 1.5rem; background: var(--bg); color: var(--muted); font-size: 0.9rem; z-index: 2;
+}
+
+/* xterm fills its slot */
+.ph-island-inner .xterm { height: 100%; padding: 4px 6px; }
+
+/* ── markdown ────────────────────────────────────────────────────────────── */
+.ph-md {
+  overflow: auto;
+  padding: 0.8rem 1.1rem;
+  line-height: 1.55;
+  color: var(--fg);
+}
+.ph-md h1, .ph-md h2, .ph-md h3 { border-bottom: 1px solid var(--border); padding-bottom: 0.2rem; }
+.ph-md a { color: var(--accent); }
+.ph-md code {
+  background: color-mix(in srgb, var(--fg) 12%, transparent);
+  padding: 0.1rem 0.3rem; border-radius: 4px; font-size: 0.9em;
+}
+.ph-md pre {
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  padding: 0.7rem 0.9rem; border-radius: 8px; overflow: auto;
+}
+.ph-md pre code { background: none; padding: 0; }
+.ph-md-err { color: var(--err); }

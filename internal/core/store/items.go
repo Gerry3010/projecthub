@@ -17,6 +17,7 @@ package store
 
 import (
 	"context"
+	"sort"
 
 	"github.com/Gerry3010/projecthub/internal/core/domain"
 )
@@ -62,6 +63,40 @@ func (s *Store) ListTabSets(ctx context.Context, projectFolderID string) ([]Item
 	return listItems[domain.TabSet](ctx, s, projectFolderID, domain.KindTabSet)
 }
 
+// ─── todos ────────────────────────────────────────────────────────────────────
+
+// CreateTodo adds a checklist item to a project's folder (each todo = one entry).
+func (s *Store) CreateTodo(ctx context.Context, projectFolderID string, t domain.TodoItem) (string, error) {
+	return s.putEntry(ctx, &projectFolderID, domain.KindTodo, t)
+}
+
+// UpdateTodo re-encrypts an existing todo in place (e.g. toggling Done).
+func (s *Store) UpdateTodo(ctx context.Context, id, projectFolderID string, t domain.TodoItem) error {
+	return s.updateEntry(ctx, id, &projectFolderID, domain.KindTodo, t)
+}
+
+// DeleteTodo removes a todo entry.
+func (s *Store) DeleteTodo(ctx context.Context, id string) error {
+	return s.api.DeleteEntry(ctx, id)
+}
+
+// ListTodos fetches and decrypts every todo in a project folder, sorted by the
+// manual Order (ascending), tie-breaking by CreatedAt (newest first) so legacy
+// todos (all Order 0) keep their original newest-first ordering.
+func (s *Store) ListTodos(ctx context.Context, projectFolderID string) ([]Item[domain.TodoItem], error) {
+	items, err := listItems[domain.TodoItem](ctx, s, projectFolderID, domain.KindTodo)
+	if err != nil {
+		return nil, err
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].Val.Order != items[j].Val.Order {
+			return items[i].Val.Order < items[j].Val.Order
+		}
+		return items[i].Val.CreatedAt.After(items[j].Val.CreatedAt)
+	})
+	return items, nil
+}
+
 // ─── pinned items ───────────────────────────────────────────────────────────
 
 func (s *Store) CreatePin(ctx context.Context, projectFolderID string, p domain.PinnedItem) (string, error) {
@@ -76,6 +111,12 @@ func (s *Store) ListPins(ctx context.Context, projectFolderID string) ([]Item[do
 
 func (s *Store) CreateCodeSession(ctx context.Context, projectFolderID string, cs domain.CodeSession) (string, error) {
 	return s.putEntry(ctx, &projectFolderID, domain.KindCodeSession, cs)
+}
+
+// UpdateCodeSession re-encrypts an existing code-session entry in place (e.g.
+// renaming its Title).
+func (s *Store) UpdateCodeSession(ctx context.Context, id, projectFolderID string, cs domain.CodeSession) error {
+	return s.updateEntry(ctx, id, &projectFolderID, domain.KindCodeSession, cs)
 }
 
 func (s *Store) ListCodeSessions(ctx context.Context, projectFolderID string) ([]Item[domain.CodeSession], error) {
@@ -107,6 +148,60 @@ func (s *Store) SetPipepushLink(ctx context.Context, projectFolderID string, l d
 		return existing.ID, s.updateEntry(ctx, existing.ID, &projectFolderID, domain.KindPipepushLink, l)
 	}
 	return s.putEntry(ctx, &projectFolderID, domain.KindPipepushLink, l)
+}
+
+// ─── redmine link ─────────────────────────────────────────────────────────────
+
+// GetRedmineLink returns the project's Redmine link, or nil if none is set.
+func (s *Store) GetRedmineLink(ctx context.Context, projectFolderID string) (*Item[domain.RedmineLink], error) {
+	links, err := listItems[domain.RedmineLink](ctx, s, projectFolderID, domain.KindRedmineLink)
+	if err != nil {
+		return nil, err
+	}
+	if len(links) == 0 {
+		return nil, nil
+	}
+	return &links[0], nil
+}
+
+// SetRedmineLink creates the project's Redmine link, or updates it in place if one
+// already exists. A project links to at most one Redmine instance.
+func (s *Store) SetRedmineLink(ctx context.Context, projectFolderID string, l domain.RedmineLink) (string, error) {
+	existing, err := s.GetRedmineLink(ctx, projectFolderID)
+	if err != nil {
+		return "", err
+	}
+	if existing != nil {
+		return existing.ID, s.updateEntry(ctx, existing.ID, &projectFolderID, domain.KindRedmineLink, l)
+	}
+	return s.putEntry(ctx, &projectFolderID, domain.KindRedmineLink, l)
+}
+
+// ─── workspace layout ─────────────────────────────────────────────────────────
+
+// GetLayout returns the project's tiling layout, or nil if none is saved yet.
+func (s *Store) GetLayout(ctx context.Context, projectFolderID string) (*Item[domain.Layout], error) {
+	layouts, err := listItems[domain.Layout](ctx, s, projectFolderID, domain.KindLayout)
+	if err != nil {
+		return nil, err
+	}
+	if len(layouts) == 0 {
+		return nil, nil
+	}
+	return &layouts[0], nil
+}
+
+// SetLayout creates the project's layout, or updates it in place if one exists. A
+// project has at most one layout entry.
+func (s *Store) SetLayout(ctx context.Context, projectFolderID string, l domain.Layout) (string, error) {
+	existing, err := s.GetLayout(ctx, projectFolderID)
+	if err != nil {
+		return "", err
+	}
+	if existing != nil {
+		return existing.ID, s.updateEntry(ctx, existing.ID, &projectFolderID, domain.KindLayout, l)
+	}
+	return s.putEntry(ctx, &projectFolderID, domain.KindLayout, l)
 }
 
 // ─── files ──────────────────────────────────────────────────────────────────

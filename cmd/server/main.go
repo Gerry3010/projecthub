@@ -24,9 +24,11 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/maxence-charriere/go-app/v10/pkg/app"
@@ -53,8 +55,14 @@ func main() {
 		Description: "Persönlicher Projekt-Manager mit E2E-Verschlüsselung über Passbubble.",
 		Title:       "ProjectHub",
 		Lang:        "de",
-		Icon:        app.Icon{SVG: "/web/icon.svg"},
-		Styles:      []string{"/web/app.css"},
+		Icon:        app.Icon{SVG: "/web/icon.svg", Default: "/web/icon.svg", Large: "/web/icon.svg"},
+		Styles:      []string{"/web/theme.css", "/web/app.css", "/web/shell.css"},
+		Scripts:     []string{"/web/shell.js"},
+	}
+	// Real byte length for the WASM loader's progress bar (Compress strips the gzipped
+	// app.wasm's Content-Length → loader would otherwise show "NaN%").
+	if fi, err := os.Stat(filepath.Join(env("WEB_DIR", "web"), "app.wasm")); err == nil {
+		webHandler.WasmContentLength = fmt.Sprintf("%d", fi.Size())
 	}
 
 	handler, err := server.New(server.Config{
