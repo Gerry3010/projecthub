@@ -346,17 +346,49 @@ function newWindowMod(): string {
  *  renderer answers, because only it knows which project is on screen — it calls back
  *  through phWindow.openProject and then lets the project go (see openInNewWindow). */
 function requestNewWindow(from?: { id: number }): void {
-  // Prefer the window the menu was invoked from; fall back to the focused one (the
-  // accelerator path, where the menu doesn't hand us a window on every platform).
+  sendMenuOp("new-window", from);
+}
+
+/** Deliver a menu/accelerator action to the renderer that has to answer it. Prefers the
+ *  window the menu was invoked from, falling back to the focused one (the accelerator
+ *  path, where the menu doesn't hand us a window on every platform). */
+function sendMenuOp(op: string, from?: { id: number }): void {
   const w = (from ? BrowserWindow.fromId(from.id) : null) ?? BrowserWindow.getFocusedWindow();
   if (!w || w.isDestroyed()) return;
-  w.webContents.send("ph-menu", { op: "new-window" });
+  w.webContents.send("ph-menu", { op });
 }
 
 function buildMenu(): void {
   const isMac = process.platform === "darwin";
+  // Settings open with the platform-standard ⌘,/Ctrl+, — which is also where each
+  // platform expects the entry to live: in the app menu on macOS, under "Datei"
+  // elsewhere. The accelerator fires either way, the placement is just convention.
+  const settingsItem: MenuItemConstructorOptions = {
+    label: "Einstellungen…",
+    accelerator: "CommandOrControl+,",
+    click: (_item, w) => sendMenuOp("settings", w),
+  };
   const template: MenuItemConstructorOptions[] = [
-    ...(isMac ? ([{ role: "appMenu" }] as MenuItemConstructorOptions[]) : []),
+    ...(isMac
+      ? ([
+          {
+            label: app.name,
+            submenu: [
+              { role: "about" },
+              { type: "separator" },
+              settingsItem,
+              { type: "separator" },
+              { role: "services" },
+              { type: "separator" },
+              { role: "hide" },
+              { role: "hideOthers" },
+              { role: "unhide" },
+              { type: "separator" },
+              { role: "quit" },
+            ],
+          },
+        ] as MenuItemConstructorOptions[])
+      : []),
     {
       label: "Datei",
       submenu: [
@@ -365,6 +397,7 @@ function buildMenu(): void {
           accelerator: `${newWindowMod()}+Shift+N`,
           click: (_item, w) => requestNewWindow(w),
         },
+        ...(isMac ? [] : [{ type: "separator" } as MenuItemConstructorOptions, settingsItem]),
         { type: "separator" },
         { role: "close", label: "Fenster schließen" },
         ...(isMac ? [] : ([{ role: "quit", label: "Beenden" }] as MenuItemConstructorOptions[])),

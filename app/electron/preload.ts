@@ -47,8 +47,10 @@ contextBridge.exposeInMainWorld("phSecure", {
 // The menu bar's "open in new window" is answered by the renderer (only it knows which
 // project is on screen), so it registers a callback here that the main process triggers.
 let newWindowCB: (() => void) | null = null;
+let settingsCB: (() => void) | null = null;
 ipcRenderer.on("ph-menu", (_e, req: { op?: string }) => {
   if (req?.op === "new-window") newWindowCB?.();
+  if (req?.op === "settings") settingsCB?.();
 });
 
 contextBridge.exposeInMainWorld("phWindow", {
@@ -75,6 +77,10 @@ contextBridge.exposeInMainWorld("phWindow", {
   // Register the renderer's handler for the menu action / keyboard shortcut.
   onNewWindow: (cb: () => void): void => {
     newWindowCB = cb;
+  },
+  // Register the renderer's handler for "Einstellungen…" (⌘,/Ctrl+,).
+  onSettings: (cb: () => void): void => {
+    settingsCB = cb;
   },
   // Device-local modifier of the "open in new window" shortcut (…+Shift+N).
   getNewWindowMod: (): string => ipcRenderer.sendSync("ph-window", { op: "get-newwindow-mod" }) || "",

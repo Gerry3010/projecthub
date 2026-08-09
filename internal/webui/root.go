@@ -327,6 +327,14 @@ func (r *Root) OnMount(ctx app.Context) {
 			return nil
 		}))
 	}
+	// "Einstellungen…" (⌘,/Ctrl+,) from the menu bar opens the settings overlay — it
+	// works over both the home view and an open workspace, like the rail's gear.
+	if pw := app.Window().Get("phWindow"); pw.Truthy() && pw.Get("onSettings").Truthy() {
+		pw.Call("onSettings", app.FuncOf(func(_ app.Value, _ []app.Value) any {
+			ctx.Dispatch(func(ctx app.Context) { r.showSettings = true })
+			return nil
+		}))
+	}
 	if r.unlocked {
 		return
 	}
