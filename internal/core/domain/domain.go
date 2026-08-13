@@ -207,7 +207,7 @@ type Project struct {
 	Title       string      `json:"title"`
 	Description string      `json:"description,omitempty"`
 	Slug        string      `json:"slug"`
-	LocalPath   string      `json:"local_path,omitempty"` // real cwd on this machine; see ProjectRef.Cwd
+	LocalPath   string      `json:"local_path,omitempty"`   // real cwd on this machine; see ProjectRef.Cwd
 	Color       string      `json:"color,omitempty"`        // accent (CSS hex); mirrored to ProjectRef.Color
 	Background  *Background `json:"background,omitempty"`   // per-project wallpaper/glass; mirrored to ProjectRef.Background
 	EditorTheme string      `json:"editor_theme,omitempty"` // CodeMirror theme override; mirrored to ProjectRef.EditorTheme
@@ -437,7 +437,7 @@ type PipepushLink struct {
 // X-Redmine-API-Key and never persists it. At most one per project.
 type RedmineLink struct {
 	BaseURL   string    `json:"base_url"`             // e.g. https://redmine.example.com
-	APIKey    string    `json:"api_key,omitempty"`   // Redmine REST API key (account setting)
+	APIKey    string    `json:"api_key,omitempty"`    // Redmine REST API key (account setting)
 	ProjectID string    `json:"project_id,omitempty"` // optional: Redmine project id/identifier filter
 	Label     string    `json:"label,omitempty"`
 	LinkedAt  time.Time `json:"linked_at"`

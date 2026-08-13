@@ -93,9 +93,9 @@ type detailItem struct {
 	kind    domain.Kind
 	id      string
 	label   string
-	tabs    []domain.Tab        // for tab sets
-	pin     domain.PinnedItem   // for pins
-	session domain.CodeSession  // for Claude Code sessions
+	tabs    []domain.Tab       // for tab sets
+	pin     domain.PinnedItem  // for pins
+	session domain.CodeSession // for Claude Code sessions
 }
 
 // New builds the initial model on the login screen.

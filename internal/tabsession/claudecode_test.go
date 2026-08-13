@@ -11,7 +11,7 @@ import (
 func TestEncodeCwd(t *testing.T) {
 	cases := map[string]string{
 		"/home/user/Projects/GO-Projekte/projecthub": "-home-user-Projects-GO-Projekte-projecthub",
-		"/home/user/x/.claude-worktrees/browser":          "-home-user-x--claude-worktrees-browser",
+		"/home/user/x/.claude-worktrees/browser":     "-home-user-x--claude-worktrees-browser",
 	}
 	for in, want := range cases {
 		if got := encodeCwd(in); got != want {

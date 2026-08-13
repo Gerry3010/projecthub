@@ -355,7 +355,7 @@ func (s *Server) ptyAlive(w http.ResponseWriter, r *http.Request) {
 // openIn opens a URL or filesystem path in the system's default handler.
 func (s *Server) openIn(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Type   string `json:"type"`           // "url" | "path"
+		Type   string `json:"type"` // "url" | "path"
 		Target string `json:"target"`
 		With   string `json:"with,omitempty"` // optional program, e.g. "code" (VS Code)
 	}
