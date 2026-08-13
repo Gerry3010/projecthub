@@ -198,7 +198,7 @@ func (w *Workspace) execTileControl(tool string, args json.RawMessage) (any, err
 		if findLeaf(w.layout.Root, a.PaneID) == nil {
 			return nil, errors.New("no such tile: " + a.PaneID)
 		}
-		w.focused = a.PaneID
+		w.focusTile(a.PaneID)
 		return map[string]bool{"ok": true}, nil
 	}
 	return nil, fmt.Errorf("unknown tile tool %q", tool)

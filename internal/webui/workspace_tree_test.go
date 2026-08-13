@@ -105,3 +105,74 @@ func TestActiveBrowserTab(t *testing.T) {
 		t.Fatal("invalid json should yield nil")
 	}
 }
+
+// TestForkParamsDropsInstanceScoped pins the split-a-terminal bug: splitting a tile
+// used to clone pty_id into the new pane, so both panes attached to the SAME PTY.
+// The sidecar serves one subscriber per session, so the second attach took it over —
+// you typed into one terminal and it appeared in the other.
+func TestForkParamsDropsInstanceScoped(t *testing.T) {
+	src := map[string]string{
+		"cwd":        "/home/x/proj",
+		"cmd":        "claude",
+		"pty_id":     "pty-abc",
+		"session_id": "sess-1",
+		"prompt":     "hallo",
+	}
+	got := forkParams(src)
+	for _, k := range []string{"pty_id", "session_id", "prompt"} {
+		if _, ok := got[k]; ok {
+			t.Errorf("forkParams kept instance-scoped %q — the new pane would hijack the old one's session", k)
+		}
+	}
+	if got["cwd"] != "/home/x/proj" || got["cmd"] != "claude" {
+		t.Fatalf("forkParams dropped tile-kind params: %+v", got)
+	}
+	// The source must be untouched: it still owns its live session.
+	if src["pty_id"] != "pty-abc" {
+		t.Fatal("forkParams mutated the source params")
+	}
+}
+
+func TestSplitTileGivesNewPaneItsOwnSession(t *testing.T) {
+	w := &Workspace{}
+	w.layout.Root = &domain.LayoutNode{
+		PaneID: "a", Type: domain.TileTerminal,
+		Params: map[string]string{"cwd": "/p", "cmd": "claude", "pty_id": "pty-1"},
+	}
+	w.splitTile("a", "row")
+	ls := leaves(w.layout.Root)
+	if len(ls) != 2 {
+		t.Fatalf("expected 2 leaves after split, got %d", len(ls))
+	}
+	if ls[0].Params["pty_id"] != "pty-1" {
+		t.Fatal("the original pane lost its running session")
+	}
+	if ls[1].Params["pty_id"] != "" {
+		t.Fatalf("the new pane inherited pty_id %q — both panes would drive one PTY", ls[1].Params["pty_id"])
+	}
+	if ls[1].Params["cwd"] != "/p" || ls[1].Params["cmd"] != "claude" {
+		t.Fatalf("the new pane should still be the same KIND of tile: %+v", ls[1].Params)
+	}
+}
+
+// TestDedupeInstanceParamsHealsSavedLayout covers layouts persisted before the split
+// fix, which can already hold the duplicated pty_id on disk.
+func TestDedupeInstanceParamsHealsSavedLayout(t *testing.T) {
+	a := &domain.LayoutNode{PaneID: "a", Type: domain.TileTerminal, Params: map[string]string{"pty_id": "dup"}}
+	b := &domain.LayoutNode{PaneID: "b", Type: domain.TileTerminal, Params: map[string]string{"pty_id": "dup"}}
+	c := &domain.LayoutNode{PaneID: "c", Type: domain.TileTerminal, Params: map[string]string{"pty_id": "own"}}
+	root := &domain.LayoutNode{Dir: "row", PaneID: "s1", A: a,
+		B: &domain.LayoutNode{Dir: "col", PaneID: "s2", A: b, B: c}}
+
+	dedupeInstanceParams(root)
+
+	if a.Params["pty_id"] != "dup" {
+		t.Fatal("the first claimant should keep the session")
+	}
+	if _, ok := b.Params["pty_id"]; ok {
+		t.Fatal("the duplicate should have been stripped")
+	}
+	if c.Params["pty_id"] != "own" {
+		t.Fatal("an unrelated pane's own session must survive")
+	}
+}

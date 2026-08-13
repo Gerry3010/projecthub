@@ -624,7 +624,7 @@ func (r *Root) projectsView() app.UI {
 		app.P().Class("ph-eyebrow").Text("Projekte"),
 		app.Ul().Class("ph-list "+r.homeListClass()).Body(
 			app.Range(r.projects).Slice(func(i int) app.UI {
-				return &projectItem{r: r, p: r.projects[i]}
+				return &projectItem{r: r, P: r.projects[i], Rev: nextRev()}
 			}),
 			app.If(len(r.projects) == 0, func() app.UI {
 				return app.Li().Class("ph-empty-card").Text("Noch keine Projekte — oben eins anlegen oder links über ＋.")
@@ -698,14 +698,15 @@ func (r *Root) toggleHomeView(ctx app.Context, _ app.Event) {
 // layout tiles via nodeView in workspace.go).
 type projectItem struct {
 	app.Compo
-	r *Root
-	p domain.ProjectRef
+	P   domain.ProjectRef
+	Rev int // see compo.go
+	r   *Root
 }
 
-func (it *projectItem) CompoID() string { return it.p.ID }
+func (it *projectItem) CompoID() string { return it.P.ID }
 
 func (it *projectItem) Render() app.UI {
-	p, r := it.p, it.r
+	p, r := it.P, it.r
 	meta := p.LocalPath
 	if meta == "" {
 		meta = "kein lokaler Pfad"
@@ -737,7 +738,7 @@ func (r *Root) suggestionsView() app.UI {
 		app.P().Class("ph-eyebrow").Text("Aus Claude Code"),
 		app.Ul().Class("ph-list "+r.homeListClass()).Body(
 			app.Range(r.suggestions).Slice(func(i int) app.UI {
-				return &suggestItem{r: r, s: r.suggestions[i]}
+				return &suggestItem{r: r, S: r.suggestions[i], Rev: nextRev()}
 			}),
 		),
 	)
@@ -748,14 +749,15 @@ func (r *Root) suggestionsView() app.UI {
 // cleanly — see projectItem for the rationale.
 type suggestItem struct {
 	app.Compo
-	r *Root
-	s nativeclient.ClaudeSuggestion
+	S   nativeclient.ClaudeSuggestion
+	Rev int // see compo.go
+	r   *Root
 }
 
-func (it *suggestItem) CompoID() string { return it.s.Cwd }
+func (it *suggestItem) CompoID() string { return it.S.Cwd }
 
 func (it *suggestItem) Render() app.UI {
-	s, r := it.s, it.r
+	s, r := it.S, it.r
 	return app.Li().Class("ph-item ph-suggest-item").Body(
 		app.Div().Class("ph-suggest-info").Body(
 			app.Span().Class("ph-title").Text(suggestionTitle(s)),

@@ -375,7 +375,7 @@ func (t *todoTile) Render() app.UI {
 		app.If(t.status != "", func() app.UI { return app.P().Class("ph-err").Text(t.status) }),
 		app.Ul().Class("ph-list ph-todolist").Body(
 			app.Range(t.todos).Slice(func(i int) app.UI {
-				return &todoRow{t: t, item: t.todos[i]}
+				return &todoRow{t: t, Item: t.todos[i], Rev: nextRev()}
 			}),
 			app.If(t.loaded && len(t.todos) == 0, func() app.UI {
 				return app.Li().Class("ph-muted").Text("Keine Aufgaben — oben eine hinzufügen.")
@@ -391,14 +391,15 @@ func (t *todoTile) Render() app.UI {
 // instead of positionally recycling <li>s (see projectItem for the rationale).
 type todoRow struct {
 	app.Compo
+	Item store.Item[domain.TodoItem]
+	Rev  int // see compo.go
 	t    *todoTile
-	item store.Item[domain.TodoItem]
 }
 
-func (r *todoRow) CompoID() string { return r.item.ID }
+func (r *todoRow) CompoID() string { return r.Item.ID }
 
 func (r *todoRow) Render() app.UI {
-	t, it := r.t, r.item
+	t, it := r.t, r.Item
 	if t.editing == it.ID {
 		return app.Li().Class("ph-item ph-todoitem ph-todo-editing").Body(
 			app.Input().Class("ph-todoinput").Type("text").Value(t.editText).
@@ -638,7 +639,7 @@ func (t *filesTile) Render() app.UI {
 		app.Input().Type("file").OnChange(t.uploadFile),
 		app.Ul().Class("ph-list").Body(
 			app.Range(t.files).Slice(func(i int) app.UI {
-				return &fileRow{t: t, item: t.files[i]}
+				return &fileRow{t: t, Item: t.files[i], Rev: nextRev()}
 			}),
 			app.If(!t.loaded, func() app.UI {
 				return app.Li().Class("ph-muted").Text("Lädt…")
@@ -659,14 +660,15 @@ func (t *filesTile) Render() app.UI {
 // fileRow is a keyed row for one vault file (CompoID = entry id).
 type fileRow struct {
 	app.Compo
+	Item store.Item[domain.FileBlob]
+	Rev  int // see compo.go
 	t    *filesTile
-	item store.Item[domain.FileBlob]
 }
 
-func (r *fileRow) CompoID() string { return r.item.ID }
+func (r *fileRow) CompoID() string { return r.Item.ID }
 
 func (r *fileRow) Render() app.UI {
-	t, f := r.t, r.item
+	t, f := r.t, r.Item
 	return app.Li().Class("ph-item ph-fileitem").Body(
 		app.Div().Body(
 			app.Span().Class("ph-title ph-file-open").Title("Doppelklick: im Editor öffnen").Text(f.Val.Filename).
@@ -988,7 +990,7 @@ func (t *fileTreeTile) Render() app.UI {
 			OnDrop(t.dropInto(t.rootPath)).
 			Body(
 				app.Range(t.visible()).Slice(func(i int) app.UI {
-					return &treeRow{t: t, item: t.visible()[i]}
+					return &treeRow{t: t, Item: t.visible()[i], Rev: nextRev()}
 				}),
 				app.If(len(t.children[t.rootPath]) == 0 && t.rootPath != "", func() app.UI {
 					return app.Li().Class("ph-muted").Text("Leerer Ordner.")
@@ -1049,14 +1051,15 @@ func (t *fileTreeTile) newForm() app.UI {
 // treeRow is a keyed row for one file/folder (CompoID = full path).
 type treeRow struct {
 	app.Compo
+	Item treeItem
+	Rev  int // see compo.go
 	t    *fileTreeTile
-	item treeItem
 }
 
-func (r *treeRow) CompoID() string { return r.item.path }
+func (r *treeRow) CompoID() string { return r.Item.path }
 
 func (r *treeRow) Render() app.UI {
-	t, it := r.t, r.item
+	t, it := r.t, r.Item
 	iconName := "file"
 	if it.isDir {
 		if t.expanded[it.path] {
@@ -1241,7 +1244,7 @@ func (t *sessionsTile) Render() app.UI {
 		app.Ul().Class("ph-list").Body(
 			app.Range(t.sessions).Slice(func(i int) app.UI {
 				s := t.sessions[i]
-				return &sessionRow{t: t, item: s}
+				return &sessionRow{t: t, Item: s, Rev: nextRev()}
 			}),
 			app.If(t.loaded && len(t.sessions) == 0, func() app.UI {
 				return app.Li().Class("ph-muted").Text("Keine gespeicherten Sessions.")
@@ -1254,7 +1257,7 @@ func (t *sessionsTile) Render() app.UI {
 				app.Ul().Class("ph-list").Body(
 					app.Range(t.unsavedScanned()).Slice(func(i int) app.UI {
 						cs := t.unsavedScanned()[i]
-						return &scannedRow{t: t, cs: cs}
+						return &scannedRow{t: t, CS: cs, Rev: nextRev()}
 					}),
 				),
 			)
@@ -1265,14 +1268,15 @@ func (t *sessionsTile) Render() app.UI {
 // sessionRow is a keyed wrapper for one saved session (see projectItem rationale).
 type sessionRow struct {
 	app.Compo
+	Item store.Item[domain.CodeSession]
+	Rev  int // see compo.go
 	t    *sessionsTile
-	item store.Item[domain.CodeSession]
 }
 
-func (r *sessionRow) CompoID() string { return r.item.ID }
+func (r *sessionRow) CompoID() string { return r.Item.ID }
 
 func (r *sessionRow) Render() app.UI {
-	t, s := r.t, r.item
+	t, s := r.t, r.Item
 	cwd := s.Val.Cwd
 	if cwd == "" {
 		cwd = t.Cwd
@@ -1309,14 +1313,15 @@ func (r *sessionRow) Render() app.UI {
 // scannedRow is a keyed wrapper for one discovered-but-unsaved session.
 type scannedRow struct {
 	app.Compo
-	t  *sessionsTile
-	cs domain.CodeSession
+	CS  domain.CodeSession
+	Rev int // see compo.go
+	t   *sessionsTile
 }
 
-func (r *scannedRow) CompoID() string { return r.cs.SessionID }
+func (r *scannedRow) CompoID() string { return r.CS.SessionID }
 
 func (r *scannedRow) Render() app.UI {
-	cs := r.cs
+	cs := r.CS
 	return app.Li().Class("ph-item ph-scanned").Body(
 		app.Div().Class("ph-suggest-info").Body(
 			app.Span().Class("ph-title").Text(orText(cs.Title, cs.SessionID)),
@@ -1462,7 +1467,7 @@ func (t *passbubbleTile) Render() app.UI {
 		app.P().Class("ph-muted").Text("Logins/Notizen aus deinem Passbubble-Tresor. Inhalte werden erst beim Anzeigen entschlüsselt."),
 		app.Ul().Class("ph-list").Body(
 			app.Range(t.links).Slice(func(i int) app.UI {
-				return &pbLinkRow{t: t, item: t.links[i]}
+				return &pbLinkRow{t: t, Item: t.links[i], Rev: nextRev()}
 			}),
 			app.If(t.loaded && len(t.links) == 0, func() app.UI {
 				return app.Li().Class("ph-muted").Text("Keine verknüpften Einträge.")
@@ -1502,14 +1507,15 @@ func (t *passbubbleTile) Render() app.UI {
 // pbLinkRow is a keyed wrapper for one linked Passbubble entry (see projectItem).
 type pbLinkRow struct {
 	app.Compo
+	Item store.Item[domain.PassbubbleLink]
+	Rev  int // see compo.go
 	t    *passbubbleTile
-	item store.Item[domain.PassbubbleLink]
 }
 
-func (r *pbLinkRow) CompoID() string { return r.item.ID }
+func (r *pbLinkRow) CompoID() string { return r.Item.ID }
 
 func (r *pbLinkRow) Render() app.UI {
-	t, l := r.t, r.item
+	t, l := r.t, r.Item
 	revealed, isOpen := t.reveal[l.Val.EntryID]
 	revealLabel := "anzeigen"
 	if isOpen {

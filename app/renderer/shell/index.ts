@@ -127,6 +127,21 @@ function rehomeIslands(): void {
   });
 }
 
+/** Put the keyboard into paneID's island. Called by go-app whenever a tile becomes the
+ *  focused one (click, or the MCP tile_focus tool). Islands that own a real input —
+ *  xterm, CodeMirror — publish a _focus hook on their element; everything else is a
+ *  no-op, since go-app-rendered tiles take focus natively. */
+function focusIsland(paneID: string): void {
+  const island = registry.get(paneID);
+  const focus = island && (island.el as any)._focus;
+  if (typeof focus !== "function") return;
+  try {
+    focus();
+  } catch {
+    /* island not ready yet (not attached / disposed) */
+  }
+}
+
 function destroyIsland(paneID: string): void {
   const island = registry.get(paneID);
   if (!island) return;
@@ -185,6 +200,14 @@ function applyTerminalWordMod(key: string): void {
   }
 }
 
+// Which pane currently owns which PTY session (ptyId → paneID). The sidecar serves a
+// single subscriber per session: a second pane attaching to the same id takes it over
+// and the first goes deaf, so you would end up typing into the wrong terminal. The Go
+// side no longer copies pty_id when a tile is split, but a layout saved before that —
+// or any future path that duplicates params — must not be able to reintroduce it, so
+// reattach is refused here for an id another live pane already holds.
+const ptyOwners = new Map<string, string>();
+
 function mountTerminal(el: HTMLElement, params: Record<string, string>, paneID = ""): Island {
   const nat = phNative();
   const term = new Terminal({
@@ -207,6 +230,7 @@ function mountTerminal(el: HTMLElement, params: Record<string, string>, paneID =
     }
   };
   (el as any)._fit = doFit;
+  (el as any)._focus = () => term.focus();
 
   let ws: WebSocket | null = null;
   let closed = false;
@@ -294,7 +318,8 @@ function mountTerminal(el: HTMLElement, params: Record<string, string>, paneID =
       try {
         // Reattach to a still-running session after a renderer reload, if its PTY is
         // alive (the sidecar replays the scrollback on connect).
-        if (params.pty_id) {
+        const ownedElsewhere = params.pty_id ? (ptyOwners.get(params.pty_id) ?? paneID) !== paneID : false;
+        if (params.pty_id && !ownedElsewhere) {
           const alive = await fetch(nat.base + "/native/pty/" + encodeURIComponent(params.pty_id), {
             headers: { Authorization: "Bearer " + nat.token },
           })
@@ -329,6 +354,7 @@ function mountTerminal(el: HTMLElement, params: Record<string, string>, paneID =
         term.writeln(`\x1b[31mTerminal-Start fehlgeschlagen: ${e}\x1b[0m`);
         return;
       }
+      if (ptyId) ptyOwners.set(ptyId, paneID);
 
       const wsURL = nat.base.replace(/^http/, "ws") + `/native/pty/${ptyId}/ws`;
       ws = new WebSocket(wsURL, nat.wsBearer);
@@ -375,6 +401,7 @@ function mountTerminal(el: HTMLElement, params: Record<string, string>, paneID =
       // the PTY. A renderer reload does NOT run cleanup, so that path keeps the session
       // alive for reattach-by-id instead.
       if (ptyId && nat) {
+        if (ptyOwners.get(ptyId) === paneID) ptyOwners.delete(ptyId);
         fetch(nat.base + "/native/pty/" + encodeURIComponent(ptyId), {
           method: "DELETE",
           headers: { Authorization: "Bearer " + nat.token },
@@ -555,6 +582,7 @@ function mountEditor(el: HTMLElement, params: Record<string, string>, paneID: st
       ],
     }),
   });
+  (el as any)._focus = () => view.focus();
 
   // Live-reconfigure this editor when the theme changes (from the Settings screen's
   // editor-theme picker or go-app's initial push).
@@ -1479,6 +1507,7 @@ function safeParse(s: string): Record<string, string> {
 (window as any).phShell = {
   attachIsland,
   destroyIsland,
+  focusIsland,
   parkIslands,
   rehomeIslands,
   applySearchEngine,

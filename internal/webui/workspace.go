@@ -197,6 +197,9 @@ func (w *Workspace) OnMount(ctx app.Context) {
 			if w.layout.Root == nil {
 				w.layout.Root = newLeaf(domain.TileTerminal, map[string]string{"cwd": w.Ref.LocalPath})
 			}
+			// Heal layouts saved before forkParams: a split used to copy pty_id, so two
+			// panes could restore onto the same PTY session.
+			dedupeInstanceParams(w.layout.Root)
 			w.accountBg = accountBg
 			w.loaded = true
 			applyBackground(eff, imgURL)
@@ -366,26 +369,31 @@ func (w *Workspace) addMenu() app.UI {
 // ("closing the wrong tile"). Keying by PaneID (DismountEnforcer.CompoID) makes
 // go-app dismount+mount cleanly whenever a position's node identity changes.
 func (w *Workspace) renderNode(n *domain.LayoutNode) app.UI {
-	return &nodeView{w: w, node: n}
+	return &nodeView{w: w, Node: n, Rev: nextRev()}
 }
 
 // nodeView is the keyed wrapper for one split/leaf position in the layout tree.
+// Node/Rev are exported so go-app actually reconciles it — see compo.go. Without
+// Rev the tree froze at its first render: closing a tile left the focus ring on the
+// gone pane, and a tile label that depends on live params (browser page title,
+// Claude chat title) never caught up.
 type nodeView struct {
 	app.Compo
+	Node *domain.LayoutNode
+	Rev  int
 	w    *Workspace
-	node *domain.LayoutNode
 }
 
 // CompoID keys reconciliation by the node's PaneID (empty slot → stable sentinel).
 func (v *nodeView) CompoID() string {
-	if v.node == nil {
+	if v.Node == nil {
 		return "ph-empty"
 	}
-	return v.node.PaneID
+	return v.Node.PaneID
 }
 
 func (v *nodeView) Render() app.UI {
-	n := v.node
+	n := v.Node
 	if n == nil {
 		return app.Div().Class("ph-empty").Text("Leerer Workspace — oben ein Tile hinzufügen.")
 	}
@@ -412,6 +420,10 @@ func (w *Workspace) renderTile(n *domain.LayoutNode) app.UI {
 	// The whole tile is the DROP target, but only the titlebar is draggable — else a
 	// drag started inside a terminal/webview and the tile could vanish.
 	return app.Div().Class(cls).Attr("data-pane", paneID).
+		// Clicking anywhere in a tile selects it AND hands it the keyboard, so the
+		// focus ring and where your typing lands can never disagree. mousedown (not
+		// click) so it wins before the browser settles focus on its own.
+		OnMouseDown(func(ctx app.Context, _ app.Event) { w.focusTile(paneID) }).
 		OnDragOver(func(ctx app.Context, e app.Event) { e.PreventDefault() }).
 		OnDrop(func(ctx app.Context, e app.Event) {
 			e.PreventDefault()
@@ -558,6 +570,27 @@ func (w *Workspace) islandTile(n *domain.LayoutNode) app.UI {
 	)
 }
 
+// focusTile makes paneID the focused tile: it moves the focus ring and puts the
+// keyboard into that tile's island (terminal/editor), which is the part the ring
+// alone never did. The re-render is dispatched on the workspace context so the
+// PREVIOUSLY focused tile drops its ring too — an event handler on its own only
+// refreshes the tile that was clicked.
+func (w *Workspace) focusTile(paneID string) {
+	focusIsland(paneID)
+	if w.focused == paneID {
+		return
+	}
+	w.wctx.Dispatch(func(app.Context) { w.focused = paneID })
+}
+
+// focusIsland asks the JS island layer to put the keyboard into paneID's island;
+// a no-op for tiles go-app renders itself (they take focus natively).
+func focusIsland(paneID string) {
+	if shell := app.Window().Get("phShell"); shell.Truthy() {
+		shell.Call("focusIsland", paneID)
+	}
+}
+
 // setParam updates one leaf param in place and returns the leaf (nil if gone).
 func (w *Workspace) setParam(paneID, key, val string) *domain.LayoutNode {
 	leaf := findLeaf(w.layout.Root, paneID)
@@ -661,7 +694,7 @@ func (w *Workspace) splitTile(paneID, dir string) {
 	*parent = &domain.LayoutNode{
 		Dir: dir, Ratio: 0.5, PaneID: uuid.NewString(),
 		A: old,
-		B: newLeaf(old.Type, cloneParams(old.Params)),
+		B: newLeaf(old.Type, forkParams(old.Params)),
 	}
 	_ = side
 	w.persistSoon()
@@ -994,6 +1027,47 @@ func removeLeaf(slot **domain.LayoutNode, paneID string) bool {
 		return true
 	}
 	return removeLeaf(&n.A, paneID) || removeLeaf(&n.B, paneID)
+}
+
+// instanceParams are params bound to ONE live tile instance rather than to the kind
+// of tile it is. They must never be copied into a second pane: pty_id addresses a
+// running PTY, and the sidecar allows a single subscriber per session — so two panes
+// sharing one id means the later one takes the session over and the earlier goes
+// deaf, i.e. you type in one terminal and it lands in the other. session_id would
+// likewise start a second `claude --resume` against the same transcript, and prompt
+// is a one-shot start argument that must not be replayed.
+var instanceParams = []string{"pty_id", "session_id", "prompt"}
+
+// forkParams clones params for a NEW pane derived from an existing one (tile split),
+// dropping everything instance-scoped. Use cloneParams only when the params stay with
+// the same pane.
+func forkParams(p map[string]string) map[string]string {
+	out := cloneParams(p)
+	for _, k := range instanceParams {
+		delete(out, k)
+	}
+	return out
+}
+
+// dedupeInstanceParams strips instance-scoped params from every pane that shares them
+// with an earlier pane, keeping the first occurrence. Layouts persisted before
+// forkParams existed can hold a duplicated pty_id, which would have both panes
+// reattach to the same PTY on restore.
+func dedupeInstanceParams(root *domain.LayoutNode) {
+	seen := map[string]bool{}
+	for _, leaf := range leaves(root) {
+		for _, k := range instanceParams {
+			v := leaf.Params[k]
+			if v == "" {
+				continue
+			}
+			if seen[k+"\x00"+v] {
+				delete(leaf.Params, k)
+				continue
+			}
+			seen[k+"\x00"+v] = true
+		}
+	}
 }
 
 func cloneParams(p map[string]string) map[string]string {
