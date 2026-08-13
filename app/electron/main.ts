@@ -462,6 +462,17 @@ function registerWindowControls(): void {
         app.relaunch();
         app.exit(0);
         return;
+      case "get-browser-cache":
+        e.returnValue = browserCacheOn;
+        return;
+      case "set-browser-cache":
+        setBrowserCache(!!req.on);
+        e.returnValue = true;
+        return;
+      case "clear-browser-cache":
+        clearBrowserCache();
+        e.returnValue = true;
+        return;
       case "ensure-backend":
         // The Settings UI just changed the backend path/toggle — (re)attempt the local stack
         // now instead of waiting for the next launch. Fire-and-forget (renderer used send()).
@@ -608,11 +619,74 @@ function hardenWebviewGuests(): void {
     // still reaches here (e.g. a script-driven open) is denied rather than spawning
     // a native window.
     contents.setWindowOpenHandler(() => ({ action: "deny" }));
+    guests.add(contents);
+    contents.once("destroyed", () => guests.delete(contents));
+    applyGuestCache(contents); // before the first navigation, so page 1 is uncached too
   });
   // Geolocation / media / notifications off for the shared browser partition (MVP).
+  session.fromPartition(BROWSER_PARTITION).setPermissionRequestHandler((_wc, _perm, cb) => cb(false));
+}
+
+// ─── browser-tile HTTP cache ──────────────────────────────────────────────────
+//
+// OFF by default. A browser tile mostly points at the thing you are working on right
+// now — a local dev server, a staging deploy, a dashboard — where a stale asset silently
+// showing yesterday's build costs far more than a re-fetch. Cookies/localStorage are
+// untouched (the partition stays persist:), so logins survive. Settings → Browser.
+//
+// Electron exposes no per-session cache switch, and rewriting request headers is NOT
+// enough: a resource served from Chromium's memory cache never issues a request, so
+// webRequest never sees it (measured — scripts/bellcache.mjs). The switch that actually
+// works is the one behind DevTools' "Disable cache": CDP Network.setCacheDisabled, per
+// guest WebContents. The header rewrite stays as the upstream half of the same intent —
+// it tells servers and proxies not to hand back a stale copy either.
+const BROWSER_PARTITION = "persist:ph-browser";
+let browserCacheOn = false;
+const guests = new Set<WebContents>();
+
+/** Apply the current cache setting to one browser-tile guest. Detaches again when
+ *  caching is on, so the debugger port is free for DevTools. */
+function applyGuestCache(c: WebContents): void {
+  if (c.isDestroyed()) return;
+  try {
+    if (browserCacheOn) {
+      if (c.debugger.isAttached()) c.debugger.detach();
+      return;
+    }
+    if (!c.debugger.isAttached()) c.debugger.attach("1.3");
+    void c.debugger.sendCommand("Network.enable");
+    void c.debugger.sendCommand("Network.setCacheDisabled", { cacheDisabled: true });
+  } catch (e) {
+    // Someone else holds the debugger (guest DevTools open) — the header rewrite and the
+    // cleared disk cache still apply, so log and carry on rather than failing the tile.
+    console.error("[browser] cache control unavailable for this guest:", e);
+  }
+}
+
+function registerBrowserCache(): void {
+  browserCacheOn = secureGet("browser.cache") === "1"; // unset → off
+  const sess = session.fromPartition(BROWSER_PARTITION);
+  sess.webRequest.onBeforeSendHeaders((details, cb) => {
+    if (browserCacheOn) return cb({ requestHeaders: details.requestHeaders });
+    details.requestHeaders["Cache-Control"] = "no-cache, no-store, max-age=0";
+    details.requestHeaders["Pragma"] = "no-cache";
+    cb({ requestHeaders: details.requestHeaders });
+  });
+  if (!browserCacheOn) clearBrowserCache();
+}
+
+function setBrowserCache(on: boolean): void {
+  secureSet("browser.cache", on ? "1" : "0");
+  browserCacheOn = on;
+  guests.forEach(applyGuestCache); // takes effect in open tiles, not just new ones
+  if (!on) clearBrowserCache(); // anything cached while it was on would outlive the switch
+}
+
+function clearBrowserCache(): void {
   session
-    .fromPartition("persist:ph-browser")
-    .setPermissionRequestHandler((_wc, _perm, cb) => cb(false));
+    .fromPartition(BROWSER_PARTITION)
+    .clearCache()
+    .catch((e) => console.error("[browser] clearCache failed:", e));
 }
 
 app.whenReady().then(async () => {
@@ -620,6 +694,7 @@ app.whenReady().then(async () => {
   registerWindowControls();
   registerNotifications();
   hardenWebviewGuests();
+  registerBrowserCache();
   buildMenu();
   try {
     await startBackend();

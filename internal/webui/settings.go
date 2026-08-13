@@ -17,6 +17,7 @@ package webui
 
 import (
 	"context"
+	"strconv"
 	"strings"
 
 	"github.com/maxence-charriere/go-app/v10/pkg/app"
@@ -99,6 +100,7 @@ func (r *Root) settingsView() app.UI {
 		{"appearance", "Erscheinungsbild"},
 		{"editor", "Editor"},
 		{"terminal", "Terminal"},
+		{"browser", "Browser"},
 		{"windows", "Fenster"},
 		{"account", "Konto"},
 		{"about", "Über"},
@@ -166,6 +168,8 @@ func (r *Root) settingsPane(tab string) app.UI {
 		return r.settingsEditor()
 	case "terminal":
 		return r.settingsTerminal()
+	case "browser":
+		return r.settingsBrowser()
 	case "windows":
 		return r.settingsWindows()
 	case "account":
@@ -393,6 +397,58 @@ func setTerminalWordMod(mod string) {
 	}
 }
 
+// termBellOptions mirrors bellVoices in the shell (index.ts). The bell rings — it does
+// not raise a notification card — so this picks WHICH tone, or silences it.
+var termBellOptions = []struct{ Key, Label string }{
+	{"ping", "Ping (hell)"},
+	{"beep", "Beep (klassisch)"},
+	{"chime", "Chime (zwei Töne)"},
+	{"knock", "Knock (dumpf)"},
+	{"off", "Aus (stumm)"},
+}
+
+// terminalBell reads the device-local bell sound + volume from phSecure. Defaults
+// "ping" at 0.6 (mirrors the shell). available=false in the hosted browser build.
+func terminalBell() (kind string, vol float64, available bool) {
+	ps := app.Window().Get("phSecure")
+	if !ps.Truthy() {
+		return "ping", 0.6, false
+	}
+	kind = ps.Call("get", "ph.term.bellsound").String()
+	if kind != "off" {
+		if _, ok := bellOption(kind); !ok {
+			kind = "ping"
+		}
+	}
+	vol = 0.6
+	if v, err := strconv.ParseFloat(ps.Call("get", "ph.term.bellvol").String(), 64); err == nil && v > 0 && v <= 1 {
+		vol = v
+	}
+	return kind, vol, true
+}
+
+func bellOption(key string) (string, bool) {
+	for _, o := range termBellOptions {
+		if o.Key == key {
+			return o.Label, true
+		}
+	}
+	return "", false
+}
+
+// setTerminalBell persists sound + volume (device-local) via the shell and previews the
+// new setting right away, so picking a tone is audible instead of a guess.
+func setTerminalBell(kind string, vol float64) {
+	shell := app.Window().Get("phShell")
+	if !shell.Truthy() {
+		return
+	}
+	shell.Call("applyTerminalBell", kind, vol)
+	if kind != "off" {
+		shell.Call("playTerminalBell", kind)
+	}
+}
+
 // ─── Passbubble backend auto-start (desktop, device-local) ───────────────────────
 //
 // The desktop shell can bring the local Passbubble stack up on launch and stop it on quit.
@@ -491,7 +547,120 @@ func (r *Root) settingsTerminal() app.UI {
 				}),
 			),
 		app.P().Class("ph-settings-note").Text("Diese Taste springt/löscht im Terminal wortweise: Taste+←/→ springt ein Wort, Taste+Backspace/Entf löscht ein Wort. Gilt nur auf diesem Gerät."),
+		r.bellSettings(),
 	)
+}
+
+// bellSettings renders the terminal-bell sound picker + volume. Every change previews
+// the tone immediately (setTerminalBell), which is the only sane way to pick a sound.
+func (r *Root) bellSettings() app.UI {
+	kind, vol, ok := terminalBell()
+	if !ok {
+		return app.Div()
+	}
+	return app.Div().Body(
+		app.P().Class("ph-eyebrow ph-settings-gap").Text("Glocke (Bell)"),
+		app.Select().Class("ph-select").
+			OnChange(func(ctx app.Context, e app.Event) {
+				_, v, _ := terminalBell()
+				setTerminalBell(ctx.JSSrc().Get("value").String(), v)
+				ctx.Dispatch(func(app.Context) {}) // re-render so the volume row follows
+			}).
+			Body(
+				app.Range(termBellOptions).Slice(func(i int) app.UI {
+					o := termBellOptions[i]
+					return app.Option().Value(o.Key).Text(o.Label).Selected(o.Key == kind)
+				}),
+			),
+		app.If(kind != "off", func() app.UI {
+			return app.Div().Class("ph-settings-gap").Body(
+				app.Div().Class("ph-appr-slider").Body(
+					app.Label().Class("ph-appr-lbl").Text("Lautstärke"),
+					app.Input().Type("range").
+						Attr("min", 0.05).Attr("max", 1).Attr("step", 0.05).Value(vol).
+						// OnChange, not OnInput: dragging fires continuously and every
+						// change previews the tone — that would be a machine gun.
+						OnChange(func(ctx app.Context, e app.Event) {
+							v, err := strconv.ParseFloat(ctx.JSSrc().Get("value").String(), 64)
+							if err != nil {
+								return
+							}
+							k, _, _ := terminalBell()
+							setTerminalBell(k, v)
+						}),
+				),
+				app.Button().Class("ph-btn").Text("Ton testen").
+					OnClick(func(ctx app.Context, _ app.Event) {
+						if shell := app.Window().Get("phShell"); shell.Truthy() {
+							shell.Call("playTerminalBell", "")
+						}
+					}),
+			)
+		}),
+		app.P().Class("ph-settings-note").Text("Das Terminal spielt bei der Glocke (BEL/\\a) diesen Ton statt eine Meldung anzuzeigen. "+
+			"Meldungen mit Text (OSC 9 / OSC 777, z. B. „Claude fertig\") erscheinen weiterhin als Hinweis. Gilt nur auf diesem Gerät."),
+	)
+}
+
+// ─── Browser tab ──────────────────────────────────────────────────────────────
+
+// browserCache reads the device-local browser-tile cache toggle from the shell (it lives
+// in the main process, which owns the guests' session). available=false without the bridge.
+func browserCache() (on bool, available bool) {
+	pw := app.Window().Get("phWindow")
+	if !pw.Truthy() || !pw.Get("getBrowserCache").Truthy() {
+		return false, false
+	}
+	return pw.Call("getBrowserCache").Bool(), true
+}
+
+func setBrowserCache(on bool) {
+	if pw := app.Window().Get("phWindow"); pw.Truthy() && pw.Get("setBrowserCache").Truthy() {
+		pw.Call("setBrowserCache", on)
+	}
+}
+
+func clearBrowserCache() {
+	if pw := app.Window().Get("phWindow"); pw.Truthy() && pw.Get("clearBrowserCache").Truthy() {
+		pw.Call("clearBrowserCache")
+	}
+}
+
+func (r *Root) settingsBrowser() app.UI {
+	on, ok := browserCache()
+	if !ok {
+		return app.Div().Body(
+			app.P().Class("ph-eyebrow").Text("Browser"),
+			app.P().Class("ph-settings-note").Text("Browser-Einstellungen sind nur im Desktop-Build verfügbar."),
+		)
+	}
+	return app.Div().Body(
+		app.P().Class("ph-eyebrow").Text("Cache"),
+		app.Label().Class("ph-check").Body(
+			app.Input().Type("checkbox").Checked(on).
+				OnChange(func(ctx app.Context, e app.Event) {
+					v := ctx.JSSrc().Get("checked").Bool()
+					setBrowserCache(v)
+					ctx.Dispatch(func(app.Context) { r.status = cacheStatus(v) })
+				}),
+			app.Text("Cache im Browser-Tile verwenden"),
+		),
+		app.Button().Class("ph-btn ph-settings-gap").Text("Cache jetzt leeren").
+			OnClick(func(ctx app.Context, _ app.Event) {
+				clearBrowserCache()
+				ctx.Dispatch(func(app.Context) { r.status = "Browser-Cache geleert." })
+			}),
+		app.P().Class("ph-settings-note").Text("Standard: aus. Browser-Tiles zeigen meist etwas, an dem gerade gearbeitet wird "+
+			"(lokaler Dev-Server, Staging, Dashboard) — dort ist eine veraltete Datei aus dem Cache teurer als ein erneuter Ladevorgang. "+
+			"Cookies und Logins bleiben in jedem Fall erhalten. Gilt nur auf diesem Gerät."),
+	)
+}
+
+func cacheStatus(on bool) string {
+	if on {
+		return "Browser-Cache aktiviert."
+	}
+	return "Browser-Cache deaktiviert und geleert."
 }
 
 // ─── Fenster tab ──────────────────────────────────────────────────────────────

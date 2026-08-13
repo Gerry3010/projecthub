@@ -200,6 +200,87 @@ function applyTerminalWordMod(key: string): void {
   }
 }
 
+// ─── terminal bell sound ──────────────────────────────────────────────────────
+//
+// The bell (BEL / \a) makes a SOUND — it does not raise a toast. A bell means "look
+// here now", and a notification card that needs reading (and dismissing) is the wrong
+// answer to that; OSC 9 / OSC 777 still toast, because those carry an actual message.
+//
+// Tones are synthesised with WebAudio instead of shipping audio files: no assets, no
+// packaging story, no decode latency. Device-local via phSecure (Settings → Terminal),
+// same rationale as the word modifier — what sounds right depends on the machine.
+type BellVoice = { at: number; freq: number; dur: number; type: OscillatorType; gain: number };
+
+const bellVoices: Record<string, BellVoice[]> = {
+  beep: [{ at: 0, freq: 880, dur: 0.12, type: "square", gain: 0.25 }],
+  ping: [{ at: 0, freq: 1568, dur: 0.35, type: "sine", gain: 0.5 }],
+  chime: [
+    { at: 0, freq: 880, dur: 0.5, type: "sine", gain: 0.45 },
+    { at: 0.11, freq: 1318.5, dur: 0.55, type: "sine", gain: 0.35 },
+  ],
+  knock: [
+    { at: 0, freq: 180, dur: 0.09, type: "triangle", gain: 0.6 },
+    { at: 0.12, freq: 150, dur: 0.11, type: "triangle", gain: 0.5 },
+  ],
+};
+
+let bellSound = "ping"; // "off" or a key of bellVoices
+let bellVolume = 0.6; // 0…1
+try {
+  const s = (window as any).phSecure?.get?.("ph.term.bellsound");
+  if (s === "off" || (s && bellVoices[s])) bellSound = s;
+  const v = Number((window as any).phSecure?.get?.("ph.term.bellvol"));
+  if (Number.isFinite(v) && v > 0 && v <= 1) bellVolume = v;
+} catch {
+  /* no phSecure bridge (hosted browser build) */
+}
+
+let audioCtx: AudioContext | null = null;
+
+// playTerminalBell renders one bell. Called with no argument by the bell handler (uses
+// the configured sound); Settings passes a key to preview a sound before saving it.
+function playTerminalBell(kind?: string): void {
+  const voices = bellVoices[kind || bellSound];
+  if (!voices) return; // "off" or unknown key → silence
+  try {
+    const Ctor = (window as any).AudioContext || (window as any).webkitAudioContext;
+    if (!Ctor) return;
+    if (!audioCtx) audioCtx = new Ctor();
+    const ctx = audioCtx!;
+    // Chromium suspends the context until a gesture; a bell can arrive before the user
+    // ever clicked, so nudge it — worst case the resume is a no-op and this bell is mute.
+    if (ctx.state === "suspended") void ctx.resume();
+    const t0 = ctx.currentTime + 0.01;
+    for (const v of voices) {
+      const osc = ctx.createOscillator();
+      const amp = ctx.createGain();
+      osc.type = v.type;
+      osc.frequency.value = v.freq;
+      // Exponential decay to near-zero: a linear ramp to 0 clicks audibly at the tail.
+      amp.gain.setValueAtTime(Math.max(0.0001, v.gain * bellVolume), t0 + v.at);
+      amp.gain.exponentialRampToValueAtTime(0.0001, t0 + v.at + v.dur);
+      osc.connect(amp).connect(ctx.destination);
+      osc.start(t0 + v.at);
+      osc.stop(t0 + v.at + v.dur + 0.02);
+    }
+  } catch {
+    /* no WebAudio (or blocked) — a missing bell must never break the terminal */
+  }
+}
+
+// applyTerminalBell is called BY go-app (Settings) to pick the sound; "" volume keeps
+// the current one. Persists device-local and takes effect for every open terminal.
+function applyTerminalBell(kind: string, volume: number): void {
+  if (kind === "off" || bellVoices[kind]) bellSound = kind;
+  if (Number.isFinite(volume) && volume > 0 && volume <= 1) bellVolume = volume;
+  try {
+    (window as any).phSecure?.set?.("ph.term.bellsound", bellSound);
+    (window as any).phSecure?.set?.("ph.term.bellvol", String(bellVolume));
+  } catch {
+    /* no phSecure bridge */
+  }
+}
+
 // Which pane currently owns which PTY session (ptyId → paneID). The sidecar serves a
 // single subscriber per session: a second pane attaching to the same id takes it over
 // and the first goes deaf, so you would end up typing into the wrong terminal. The Go
@@ -267,16 +348,17 @@ function mountTerminal(el: HTMLElement, params: Record<string, string>, paneID =
     return false; // consumed — don't let xterm process it too
   });
 
-  // Notifications: terminal bell + OSC 9 / OSC 777, plus a PTY-idle "task done" hint
-  // for Claude sessions. All route through emitNotify (in-app toast + OS desktop).
+  // Notifications: OSC 9 / OSC 777 and the PTY-idle "task done" hint route through
+  // emitNotify (in-app toast + OS desktop). The bell only makes a sound — see
+  // playTerminalBell. Rate-limited so a script spamming BEL can't machine-gun it.
   const notifyLabel = params.cmd === "claude" || params.session_id ? "Claude" : "Terminal";
   const isClaude = params.cmd === "claude" || !!params.session_id;
   let lastBell = 0;
   term.onBell(() => {
     const now = Date.now();
-    if (now - lastBell > 3000) {
+    if (now - lastBell > 700) {
       lastBell = now;
-      emitNotify(notifyLabel, "Glocke");
+      playTerminalBell();
     }
   });
   term.parser.registerOscHandler(9, (data: string) => {
@@ -1513,6 +1595,8 @@ function safeParse(s: string): Record<string, string> {
   applySearchEngine,
   applyEditorTheme,
   applyTerminalWordMod,
+  applyTerminalBell,
+  playTerminalBell,
 };
 
 // The DOM-touching init (drop-hint appends to <body>) must wait: this script runs in

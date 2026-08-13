@@ -22,7 +22,8 @@
     "e2e:remember": "node scripts/remember.mjs",
     "e2e:server": "node scripts/server.mjs",
     "e2e:multiwindow": "node scripts/multiwindow.mjs",
-    "e2e:tilefocus": "node scripts/tilefocus.mjs"
+    "e2e:tilefocus": "node scripts/tilefocus.mjs",
+    "e2e:bellcache": "node scripts/bellcache.mjs"
   },
   "dependencies": {
     "@codemirror/lang-css": "^6.3.1",

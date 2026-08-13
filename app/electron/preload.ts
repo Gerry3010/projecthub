@@ -91,6 +91,15 @@ contextBridge.exposeInMainWorld("phWindow", {
   ensureBackend: (): void => {
     ipcRenderer.send("ph-window", { op: "ensure-backend" });
   },
+  // Browser-tile HTTP cache (device-local, default OFF). Lives in the main process
+  // because the cache belongs to the guests' session, not to any one renderer.
+  getBrowserCache: (): boolean => ipcRenderer.sendSync("ph-window", { op: "get-browser-cache" }) === true,
+  setBrowserCache: (on: boolean): void => {
+    ipcRenderer.sendSync("ph-window", { op: "set-browser-cache", on });
+  },
+  clearBrowserCache: (): void => {
+    ipcRenderer.sendSync("ph-window", { op: "clear-browser-cache" });
+  },
 });
 
 // phNotify shows a native OS desktop notification (Electron Notification API in the
