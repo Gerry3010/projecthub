@@ -19,9 +19,9 @@ func TestNormalizeLocalPath(t *testing.T) {
 		{in: "  /home/gerry/proj  ", want: "/home/gerry/proj"}, // trimmed
 		{in: "/home/gerry/proj/", want: "/home/gerry/proj"},    // trailing sep dropped
 		{in: "/home/gerry/proj///", want: "/home/gerry/proj"},
-		{in: "/", want: "/"},   // root survives the trailing-sep trim
-		{in: "", want: ""},     // empty clears the path — allowed
-		{in: "   ", want: ""},  // whitespace only is the same as empty
+		{in: "/", want: "/"},  // root survives the trailing-sep trim
+		{in: "", want: ""},    // empty clears the path — allowed
+		{in: "   ", want: ""}, // whitespace only is the same as empty
 		{in: "relative/path", reject: true},
 		{in: "~/proj", reject: true}, // the sidecar does not expand ~
 		{in: "C:\\proj", reject: true},
