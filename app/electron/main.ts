@@ -14,6 +14,7 @@ import {
   session,
   WebContents,
   ipcMain,
+  dialog,
   safeStorage,
   Notification,
 } from "electron";
@@ -602,6 +603,22 @@ function buildMenu(): void {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
+/** Native directory chooser for the project's working directory. Async (invoke, not
+ *  sendSync) because the dialog is modal — a synchronous IPC would deadlock the
+ *  renderer while it is open. Returns "" when the user cancels. */
+function registerFolderPicker(): void {
+  ipcMain.handle("ph-pick-folder", async (e, req: { current?: string }) => {
+    const win = BrowserWindow.fromWebContents(e.sender) ?? undefined;
+    const opts = {
+      title: "Projektordner wählen",
+      properties: ["openDirectory", "createDirectory"] as Array<"openDirectory" | "createDirectory">,
+      defaultPath: req?.current || undefined,
+    };
+    const res = win ? await dialog.showOpenDialog(win, opts) : await dialog.showOpenDialog(opts);
+    return res.canceled || res.filePaths.length === 0 ? "" : res.filePaths[0];
+  });
+}
+
 /** Show native OS notifications on request from the renderer (todo reminders). */
 function registerNotifications(): void {
   ipcMain.on("ph-notify", (_e, req: { title?: string; body?: string }) => {
@@ -693,6 +710,7 @@ app.whenReady().then(async () => {
   registerSecureStore();
   registerWindowControls();
   registerNotifications();
+  registerFolderPicker();
   hardenWebviewGuests();
   registerBrowserCache();
   buildMenu();

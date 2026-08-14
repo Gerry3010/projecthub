@@ -109,6 +109,16 @@ type Root struct {
 	// settingsThemeScope: "account" (default) or "project" — which scope a theme pick
 	// in the Themes tab writes to (project option only offered when one is open).
 	settingsThemeScope string
+
+	// Projekt tab: edit buffer for the open project's local path. projPathFor is the
+	// project id the buffer was filled from, so switching projects refills it instead
+	// of showing the previous project's path.
+	projPath    string
+	projPathFor string
+	projPathMsg string
+
+	// new-project form: optional working directory chosen via the native folder picker.
+	newPath string
 }
 
 // accentColor returns the chosen app accent, or the default when none is set yet.
@@ -302,7 +312,12 @@ func (r *Root) closeProject(ctx app.Context) {
 	r.selected = nil
 	setDocTheme(r.theme)                  // back to the account theme (drop any project override)
 	applyBackground(r.accountBg, r.bgURL) // back to the account wallpaper (drop project override)
-	r.busy, r.status = true, ""
+	r.status = ""
+	// No busy flag here: the list we already hold is current, so this is a background
+	// refresh, not a blocking load. Flagging it locked up the home view for good —
+	// closing a project re-renders the rail button this handler came from, and the
+	// refresh's dispatch (which clears the flag) is dropped once that element is gone,
+	// leaving "Anlegen" and "löschen" permanently dead.
 	ctx.Async(func() { r.reload(ctx, nil) })
 }
 
@@ -617,6 +632,12 @@ func (r *Root) projectsView() app.UI {
 							r.createProject(ctx, e)
 						}
 					}),
+				// Optional: pick the working directory up front, so a hand-made project
+				// starts out as usable as one adopted from a Claude Code suggestion.
+				app.If(folderPickerAvailable(), func() app.UI {
+					return app.Button().Class("ph-btn ph-btn-ghost").Title(r.newPathTitle()).
+						Text(r.newPathLabel()).Disabled(r.busy).OnClick(r.chooseNewPath)
+				}),
 				app.Button().Class("ph-btn").Disabled(r.busy).Text("Anlegen").OnClick(r.createProject),
 			),
 			app.If(r.status != "", func() app.UI { return app.P().Class("ph-err").Text(r.status) }),
@@ -707,12 +728,12 @@ func (it *projectItem) CompoID() string { return it.P.ID }
 
 func (it *projectItem) Render() app.UI {
 	p, r := it.P, it.r
-	meta := p.LocalPath
+	meta, metaCls := p.LocalPath, "ph-proj-meta"
 	if meta == "" {
-		meta = "kein lokaler Pfad"
+		meta, metaCls = "kein lokaler Pfad — hier setzen", "ph-proj-meta ph-proj-meta-unset"
 	}
-	// The whole card opens the project; the delete link stops propagation so it
-	// doesn't also trigger the open.
+	// The whole card opens the project; the path and delete controls stop propagation
+	// so they don't also trigger the open.
 	return app.Li().Class("ph-item ph-proj").Style("--accent", p.AccentColor()).
 		OnClick(r.openProject(p)).
 		Body(
@@ -720,11 +741,18 @@ func (it *projectItem) Render() app.UI {
 				nexusIcon(p.AccentColor(), 22),
 				app.Span().Class("ph-title").Text(p.Title),
 			),
-			app.Span().Class("ph-proj-meta").Title(meta).Text(meta),
-			app.Button().Class("ph-link ph-proj-del").Text("löschen").OnClick(func(ctx app.Context, e app.Event) {
-				e.Call("stopPropagation")
-				r.deleteProject(ctx, p.ID)
-			}),
+			// The path doubles as the shortcut into this project's settings — that is
+			// where a hand-made project (which starts without one) gets its directory.
+			app.Button().Class(metaCls).Title("Arbeitsverzeichnis festlegen: "+meta).Text(meta).
+				OnClick(r.openProjectSettings(p)),
+			// Disabled while a vault round-trip is in flight: deleteProject ignores the
+			// call when busy, so an enabled-looking link would swallow the click without
+			// any feedback.
+			app.Button().Class("ph-link ph-proj-del").Text("löschen").Disabled(r.busy).
+				OnClick(func(ctx app.Context, e app.Event) {
+					e.Call("stopPropagation")
+					r.deleteProject(ctx, p.ID)
+				}),
 		)
 }
 
@@ -786,18 +814,52 @@ func (r *Root) addSuggestion(s nativeclient.ClaudeSuggestion) app.EventHandler {
 	}
 }
 
+// newPathLabel / newPathTitle describe the folder button next to the new-project
+// field: the chosen directory's name once one is picked, the invitation before that.
+func (r *Root) newPathLabel() string {
+	if r.newPath == "" {
+		return "📁 Ordner…"
+	}
+	return "📁 " + path.Base(r.newPath)
+}
+
+func (r *Root) newPathTitle() string {
+	if r.newPath == "" {
+		return "Arbeitsverzeichnis für das neue Projekt wählen (optional)"
+	}
+	return r.newPath + " — erneut klicken, um zu ändern"
+}
+
+// chooseNewPath asks the shell for a directory and, when the title field is still
+// empty, proposes the folder's name as the project title (same rule the Claude Code
+// suggestions use).
+func (r *Root) chooseNewPath(ctx app.Context, _ app.Event) {
+	pickFolder(r.newPath, func(dir string) {
+		if dir == "" {
+			return // cancelled
+		}
+		r.newPath = dir
+		if r.newTitle == "" {
+			if base := path.Base(dir); base != "" && base != "." && base != "/" {
+				r.newTitle = base
+			}
+		}
+		ctx.Dispatch(func(app.Context) {}) // the pick arrives outside a UI event
+	})
+}
+
 func (r *Root) createProject(ctx app.Context, _ app.Event) {
-	title := r.newTitle
+	title, localPath := r.newTitle, r.newPath
 	if title == "" || r.busy {
 		return
 	}
 	r.busy, r.status = true, ""
 	ctx.Async(func() {
-		if _, err := r.store.CreateProject(context.Background(), title, "", ""); err != nil {
+		if _, err := r.store.CreateProject(context.Background(), title, "", localPath); err != nil {
 			r.fail(ctx, "Anlegen fehlgeschlagen: "+err.Error())
 			return
 		}
-		r.reload(ctx, func() { r.newTitle = "" })
+		r.reload(ctx, func() { r.newTitle, r.newPath = "", "" })
 	})
 }
 

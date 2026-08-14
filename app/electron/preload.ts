@@ -100,6 +100,15 @@ contextBridge.exposeInMainWorld("phWindow", {
   clearBrowserCache: (): void => {
     ipcRenderer.sendSync("ph-window", { op: "clear-browser-cache" });
   },
+  // Native directory chooser for a project's working directory. Callback-style so the
+  // go-app (WASM) side can pass an app.FuncOf; "" means the user cancelled. The dialog
+  // is modal, hence async — never sendSync.
+  pickFolder: (current: string, cb: (dir: string) => void): void => {
+    ipcRenderer
+      .invoke("ph-pick-folder", { current })
+      .then((dir: string) => cb(dir || ""))
+      .catch(() => cb(""));
+  },
 });
 
 // phNotify shows a native OS desktop notification (Electron Notification API in the

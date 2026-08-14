@@ -90,6 +90,10 @@ func (r *Root) settingsTabKey() string {
 	if r.settingsTab == "" || r.settingsTab == "themes" {
 		return "appearance"
 	}
+	// The Projekt tab disappears when the project is closed; don't strand the pane on it.
+	if r.settingsTab == "project" && r.selected == nil {
+		return "appearance"
+	}
 	return r.settingsTab
 }
 
@@ -104,6 +108,11 @@ func (r *Root) settingsView() app.UI {
 		{"windows", "Fenster"},
 		{"account", "Konto"},
 		{"about", "Über"},
+	}
+	// Per-project settings only make sense with a project open; the tab sits first so
+	// it reads as "this project" before the account-wide sections.
+	if r.selected != nil {
+		tabs = append([]struct{ Key, Label string }{{"project", "Projekt"}}, tabs...)
 	}
 	active := r.settingsTabKey()
 	return app.Div().Class("ph-settings").Body(
@@ -164,6 +173,8 @@ func (r *Root) previewTile(title string) app.UI {
 
 func (r *Root) settingsPane(tab string) app.UI {
 	switch tab {
+	case "project":
+		return r.settingsProject()
 	case "editor":
 		return r.settingsEditor()
 	case "terminal":

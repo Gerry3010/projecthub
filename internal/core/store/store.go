@@ -288,6 +288,34 @@ func (s *Store) DeleteProject(ctx context.Context, projectID string) error {
 	return s.saveIndex(ctx, idx)
 }
 
+// SetProjectLocalPath updates a project's working directory on this machine in both
+// the ph-manifest and its RootIndex mirror. Pass "" to clear it, which puts the
+// project back on the legacy <IndexRoot>/<slug> convention (see ProjectRef.Cwd).
+// Projects created by hand start without a path; this is how one is added later.
+func (s *Store) SetProjectLocalPath(ctx context.Context, projectID, localPath string) error {
+	idx, err := s.loadIndex(ctx)
+	if err != nil {
+		return err
+	}
+	i := indexOfProject(idx.Projects, projectID)
+	if i < 0 {
+		return fmt.Errorf("project %s not found", projectID)
+	}
+	folderID := idx.Projects[i].FolderID
+
+	entryID, manifest, err := s.projectManifest(ctx, folderID)
+	if err != nil {
+		return err
+	}
+	manifest.LocalPath = localPath
+	if err := s.updateEntry(ctx, entryID, &folderID, domain.KindManifest, manifest); err != nil {
+		return err
+	}
+
+	idx.Projects[i].LocalPath = localPath
+	return s.saveIndex(ctx, idx)
+}
+
 // SetProjectColor updates a project's accent (a CSS hex like "#6366f1"; "" clears
 // it) in both the ph-manifest and its RootIndex mirror, so the change is visible in
 // the list view without decrypting the manifest.
