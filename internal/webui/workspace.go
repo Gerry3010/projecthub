@@ -450,7 +450,12 @@ func (w *Workspace) tileBar(n *domain.LayoutNode) app.UI {
 	return app.Div().Class("ph-tile-bar").
 		Attr("draggable", true).
 		OnDragStart(func(ctx app.Context, e app.Event) {
-			e.Get("dataTransfer").Call("setData", "text/plain", paneID)
+			dt := e.Get("dataTransfer")
+			dt.Call("setData", "text/plain", paneID)
+			// Typed marker: dataTransfer contents are unreadable during dragover, but
+			// the type list is not — that is how the shell's drop hint tells a tile
+			// rearrange apart from a todo reorder or a file drag.
+			dt.Call("setData", "application/x-ph-tile", paneID)
 		}).
 		Body(
 			app.Span().Class("ph-tile-dot"),

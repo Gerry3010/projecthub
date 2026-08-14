@@ -1462,13 +1462,56 @@ function initDropHint(): void {
   hint.className = "ph-drop-hint";
   hint.style.display = "none";
   document.body.appendChild(hint);
-  const hide = () => (hint.style.display = "none");
+  // Insertion line for list reorders (todos): a thin accent bar on the edge the item
+  // would land on. A rectangle would read as "replace"; a line reads as "insert here".
+  const line = document.createElement("div");
+  line.className = "ph-insert-hint";
+  line.style.display = "none";
+  document.body.appendChild(line);
 
+  const hide = () => {
+    hint.style.display = "none";
+    line.style.display = "none";
+  };
+
+  /** Draw the insertion line above or below the row under the pointer. */
+  const showInsertLine = (row: HTMLElement, e: DragEvent): void => {
+    const r = row.getBoundingClientRect();
+    if (!r.height) return hide();
+    const below = (e.clientY - r.top) / r.height > 0.5;
+    hint.style.display = "none";
+    line.style.display = "block";
+    line.style.left = r.left + "px";
+    line.style.width = r.width + "px";
+    line.style.top = (below ? r.bottom : r.top) - 1 + "px";
+  };
+
+  // Capture phase on purpose: the todo rows stop propagation so the tile (a drop
+  // target itself) stays out of a reorder — a bubbling listener here would never see
+  // those drags, and the insertion marker would never appear.
   document.addEventListener("dragover", (e) => {
+    const types = Array.from(e.dataTransfer?.types ?? []);
+    // A todo reorder stays inside its list — never show the tile-rearrange overlay for
+    // it, which is what used to make reordering look like it would move the tile.
+    if (types.includes("application/x-ph-todo")) {
+      const row = (e.target as HTMLElement)?.closest?.(".ph-todoitem") as HTMLElement | null;
+      return row ? showInsertLine(row, e) : hide();
+    }
     const tile = (e.target as HTMLElement)?.closest?.(".ph-tile") as HTMLElement | null;
     if (!tile) return hide();
     const r = tile.getBoundingClientRect();
     if (!r.width || !r.height) return hide();
+    line.style.display = "none";
+    // Dragging a file onto a tile opens it THERE — it never splits, so the half/edge
+    // preview would promise a layout change that does not happen.
+    if (types.includes("application/x-ph-path") && !types.includes("application/x-ph-tile")) {
+      hint.style.display = "block";
+      hint.style.left = r.left + "px";
+      hint.style.top = r.top + "px";
+      hint.style.width = r.width + "px";
+      hint.style.height = r.height + "px";
+      return;
+    }
     const fx = (e.clientX - r.left) / r.width;
     const fy = (e.clientY - r.top) / r.height;
     let x = r.left,
@@ -1489,9 +1532,9 @@ function initDropHint(): void {
     hint.style.top = y + "px";
     hint.style.width = w + "px";
     hint.style.height = h + "px";
-  });
-  document.addEventListener("drop", hide);
-  document.addEventListener("dragend", hide);
+  }, true);
+  document.addEventListener("drop", hide, true);
+  document.addEventListener("dragend", hide, true);
 }
 
 // ─── notifications ────────────────────────────────────────────────────────────────

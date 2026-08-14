@@ -406,7 +406,64 @@ body.ph-resizing { cursor: grabbing; user-select: none; }
 .ph-tile-btn.ph-on { color: var(--accent); }
 .ph-tile-body { flex: 1; min-height: 0; position: relative; overflow: hidden; }
 
+/* ── tile dialogs ─────────────────────────────────────────────────────────────
+   Fixed to the viewport, so a dialog opened from a tile is NOT clipped by that
+   tile's overflow:hidden and can be far larger than the tile itself. */
+.ph-dlg-host { position: fixed; inset: 0; z-index: 60; display: flex; align-items: center; justify-content: center; }
+.ph-dlg-backdrop { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.45); }
+.ph-dlg {
+  position: relative;
+  width: min(30rem, calc(100vw - 2.5rem));
+  max-height: calc(100vh - 3rem);
+  display: flex; flex-direction: column;
+  background: color-mix(in srgb, var(--ph-panel-2) 97%, transparent);
+  border: 1px solid var(--ph-line);
+  border-radius: var(--radius-md);
+  box-shadow: 0 18px 60px -12px rgba(0, 0, 0, 0.65);
+  -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+  outline: none;
+  animation: ph-dlg-in 0.13s ease-out;
+}
+@keyframes ph-dlg-in { from { opacity: 0; transform: translateY(6px) scale(0.985); } }
+@media (prefers-reduced-motion: reduce) { .ph-dlg { animation: none; } }
+.ph-dlg-head {
+  display: flex; align-items: center; gap: 0.6rem;
+  padding: 0.7rem 0.75rem 0.6rem 0.95rem;
+  border-bottom: 1px solid var(--ph-line);
+}
+.ph-dlg-title { flex: 1; font-family: var(--font-display); font-weight: 600; font-size: 1rem; color: var(--ph-ink); }
+.ph-dlg-body { padding: 0.95rem; overflow-y: auto; display: flex; flex-direction: column; gap: 0.75rem; }
+.ph-dlg-label { display: flex; flex-direction: column; gap: 0.3rem; font-size: 0.78rem; color: var(--ph-ink-3); }
+.ph-dlg-input {
+  background: var(--ph-well); border: 1px solid var(--ph-line); color: var(--ph-ink);
+  border-radius: var(--radius-sm); padding: 0.5rem 0.65rem;
+  font-family: inherit; font-size: 0.92rem; width: 100%;
+}
+.ph-dlg-input:focus { outline: none; border-color: color-mix(in srgb, var(--accent) 60%, var(--ph-line)); }
+.ph-dlg-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
+@media (max-width: 30rem) { .ph-dlg-grid { grid-template-columns: 1fr; } }
+.ph-dlg-check { display: flex; align-items: center; gap: 0.45rem; font-size: 0.88rem; color: var(--ph-ink); }
+.ph-dlg-note { margin: 0; font-size: 0.74rem; color: var(--ph-ink-3); }
+.ph-dlg-foot {
+  display: flex; gap: 0.5rem; align-items: center;
+  padding: 0.7rem 0.95rem 0.85rem;
+  border-top: 1px solid var(--ph-line);
+}
+/* the destructive action sits apart from confirm/cancel, so it is never a slip */
+.ph-dlg-foot .ph-btn-danger { margin-left: auto; }
+.ph-btn-danger { color: #ea4335; }
+.ph-btn-danger:hover:not(:disabled) { border-color: #ea4335; background: color-mix(in srgb, #ea4335 12%, transparent); }
+
 /* ── drag-drop drop zones ─────────────────────────────────────────────────── */
+/* list reorder: an insertion line at the edge the item would land on */
+.ph-insert-hint {
+  position: fixed; z-index: 9999; pointer-events: none;
+  height: 2px; background: var(--accent);
+  box-shadow: 0 0 6px var(--accent);
+  border-radius: 2px;
+}
+.ph-todoitem.ph-todo-dragging { opacity: 0.45; }
+
 .ph-tile.ph-drag-over::after {
   content: "";
   position: absolute; inset: 0;

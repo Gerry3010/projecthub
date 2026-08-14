@@ -124,10 +124,11 @@ type todoTile struct {
 	loaded  bool
 	status  string
 
-	editing    string // todo id being edited ("" = none)
+	editing    string // todo id being edited in the dialog ("" = none)
 	editText   string
 	editDue    string // datetime-local value (2006-01-02T15:04)
 	editRemind string
+	editDone   bool
 
 	dragID string        // todo id currently being dragged ("" = none)
 	stop   chan struct{} // reminder poller lifecycle
@@ -195,35 +196,54 @@ func (t *todoTile) checkReminders(ctx app.Context) {
 	}
 }
 
+// applyList installs a freshly fetched list (or its error) and always clears busy.
+//
+// It is deliberately a plain method, not a dispatch of its own: an update scheduled
+// from INSIDE a ctx.Dispatch is dropped when that same dispatch re-rendered the
+// element the context came from. Adding a todo via the "+" button did exactly that —
+// clearing the input removes the ✕ next to it, the button is re-rendered, and the
+// follow-up reload never ran, so busy stayed true and the button stayed disabled
+// after the first todo. Every path below therefore fetches in its own goroutine and
+// applies the result in ONE dispatch.
+func (t *todoTile) applyList(todos []store.Item[domain.TodoItem], err error) {
+	t.loaded, t.busy = true, false
+	if err != nil {
+		t.status = err.Error()
+		return
+	}
+	t.todos, t.status = todos, ""
+}
+
+func (t *todoTile) fetch() ([]store.Item[domain.TodoItem], error) {
+	return t.Store.ListTodos(context.Background(), t.FolderID)
+}
+
 func (t *todoTile) reload(ctx app.Context) {
 	ctx.Async(func() {
-		todos, err := t.Store.ListTodos(context.Background(), t.FolderID)
-		ctx.Dispatch(func(ctx app.Context) {
-			t.loaded, t.busy = true, false
-			if err != nil {
-				t.status = err.Error()
-				return
-			}
-			t.todos, t.status = todos, ""
-		})
+		todos, err := t.fetch()
+		ctx.Dispatch(func(app.Context) { t.applyList(todos, err) })
 	})
 }
 
 func (t *todoTile) add(ctx app.Context, _ app.Event) {
-	if t.busy || t.newText == "" {
+	if t.busy || strings.TrimSpace(t.newText) == "" {
 		return
 	}
 	t.busy = true
-	item := domain.TodoItem{Text: t.newText, CreatedAt: time.Now()}
+	// Grab the field now (the event may come from the input itself or from "+"); the
+	// element outlives the re-render, the event source does not.
+	field := inputIn(ctx.JSSrc(), ".ph-todoform")
+	item := domain.TodoItem{Text: strings.TrimSpace(t.newText), CreatedAt: time.Now()}
 	ctx.Async(func() {
-		_, err := t.Store.CreateTodo(context.Background(), t.FolderID, item)
-		ctx.Dispatch(func(ctx app.Context) {
-			if err != nil {
-				t.busy, t.status = false, err.Error()
-				return
-			}
+		if _, err := t.Store.CreateTodo(context.Background(), t.FolderID, item); err != nil {
+			ctx.Dispatch(func(app.Context) { t.busy, t.status = false, err.Error() })
+			return
+		}
+		todos, err := t.fetch()
+		ctx.Dispatch(func(app.Context) {
 			t.newText = ""
-			t.reload(ctx)
+			setInputValue(field, "") // see setInputValue: rendering "" is not enough
+			t.applyList(todos, err)
 		})
 	})
 }
@@ -244,9 +264,16 @@ func (t *todoTile) mutate(ctx app.Context, id string, fn func(v *domain.TodoItem
 	}
 	v := *out
 	ctx.Async(func() {
-		if err := t.Store.UpdateTodo(context.Background(), id, t.FolderID, v); err != nil {
-			ctx.Dispatch(func(ctx app.Context) { t.status = err.Error(); t.reload(ctx) })
+		err := t.Store.UpdateTodo(context.Background(), id, t.FolderID, v)
+		if err == nil {
+			return // the optimistic update already stands
 		}
+		// Pull the server's truth back in one go (see applyList on why not nested).
+		todos, lerr := t.fetch()
+		ctx.Dispatch(func(app.Context) {
+			t.applyList(todos, lerr)
+			t.status = err.Error()
+		})
 	})
 }
 
@@ -266,14 +293,12 @@ func (t *todoTile) toggle(id string) app.EventHandler {
 func (t *todoTile) remove(id string) app.EventHandler {
 	return func(ctx app.Context, _ app.Event) {
 		ctx.Async(func() {
-			err := t.Store.DeleteTodo(context.Background(), id)
-			ctx.Dispatch(func(ctx app.Context) {
-				if err != nil {
-					t.status = err.Error()
-					return
-				}
-				t.reload(ctx)
-			})
+			if err := t.Store.DeleteTodo(context.Background(), id); err != nil {
+				ctx.Dispatch(func(app.Context) { t.status = err.Error() })
+				return
+			}
+			todos, err := t.fetch()
+			ctx.Dispatch(func(app.Context) { t.applyList(todos, err) })
 		})
 	}
 }
@@ -286,6 +311,8 @@ func (t *todoTile) startEdit(it store.Item[domain.TodoItem]) app.EventHandler {
 		t.editText = it.Val.Text
 		t.editDue = fmtDT(it.Val.DueAt)
 		t.editRemind = fmtDT(it.Val.RemindAt)
+		t.editDone = it.Val.Done
+		focusDialogField(ctx) // caret in the text field as soon as the dialog is up
 	}
 }
 
@@ -295,41 +322,123 @@ func (t *todoTile) saveEdit(id string) app.EventHandler {
 	return func(ctx app.Context, _ app.Event) {
 		text := strings.TrimSpace(t.editText)
 		if text == "" {
+			t.status = "Ohne Text lässt sich die Aufgabe nicht speichern."
 			return
 		}
 		due, remind := parseDT(t.editDue), parseDT(t.editRemind)
-		t.editing = ""
+		done := t.editDone
+		t.editing, t.status = "", ""
 		t.mutate(ctx, id, func(v *domain.TodoItem) {
 			v.Text, v.DueAt, v.RemindAt = text, due, remind
+			if v.Done != done {
+				v.Done = done
+				if done {
+					v.DoneAt = time.Now()
+				} else {
+					v.DoneAt = time.Time{}
+				}
+			}
 		})
 	}
 }
 
-// ─ drag reorder ─
-
-func (t *todoTile) reorder(ctx app.Context, fromID, toID string) {
-	if fromID == "" || fromID == toID {
-		return
-	}
-	fromIdx, toIdx := -1, -1
-	for i, it := range t.todos {
-		switch it.ID {
-		case fromID:
-			fromIdx = i
-		case toID:
-			toIdx = i
+// editDialog is the "Aufgabe bearbeiten" modal. It lives outside the row (and outside
+// the tile's clipping box), so the form has room no matter how small the tile is —
+// the inline editor it replaces was unusable in a narrow pane.
+func (t *todoTile) editDialog() app.UI {
+	id := t.editing
+	var item store.Item[domain.TodoItem]
+	for _, it := range t.todos {
+		if it.ID == id {
+			item = it
+			break
 		}
 	}
-	if fromIdx < 0 || toIdx < 0 {
+	saveOnEnter := func(ctx app.Context, e app.Event) {
+		if e.Get("key").String() == "Enter" {
+			t.saveEdit(id)(ctx, e)
+		}
+	}
+	return tileDialog("Aufgabe bearbeiten", t.cancelEdit,
+		[]dialogAction{
+			{Label: "Speichern", Primary: true, OnClick: t.saveEdit(id)},
+			{Label: "Abbrechen", OnClick: t.cancelEdit},
+			{Label: "Löschen", Danger: true, OnClick: func(ctx app.Context, e app.Event) {
+				t.editing = ""
+				t.remove(id)(ctx, e)
+			}},
+		},
+		app.Label().Class("ph-dlg-label").Text("Aufgabe").Body(
+			app.Input().Class("ph-dlg-input ph-dlg-focus").Type("text").Value(t.editText).
+				Placeholder("Was ist zu tun?").
+				OnInput(func(ctx app.Context, e app.Event) { t.editText = ctx.JSSrc().Get("value").String() }).
+				OnKeyDown(saveOnEnter),
+		),
+		app.Div().Class("ph-dlg-grid").Body(
+			app.Label().Class("ph-dlg-label").Text("Fällig").Body(
+				app.Input().Class("ph-dlg-input").Type("datetime-local").Value(t.editDue).
+					OnInput(func(ctx app.Context, e app.Event) { t.editDue = ctx.JSSrc().Get("value").String() }).
+					OnKeyDown(saveOnEnter),
+			),
+			app.Label().Class("ph-dlg-label").Text("Erinnerung").Body(
+				app.Input().Class("ph-dlg-input").Type("datetime-local").Value(t.editRemind).
+					OnInput(func(ctx app.Context, e app.Event) { t.editRemind = ctx.JSSrc().Get("value").String() }).
+					OnKeyDown(saveOnEnter),
+			),
+		),
+		app.Label().Class("ph-check ph-dlg-check").Body(
+			app.Input().Type("checkbox").Checked(t.editDone).
+				OnChange(func(ctx app.Context, e app.Event) { t.editDone = ctx.JSSrc().Get("checked").Bool() }),
+			app.Text("Erledigt"),
+		),
+		app.If(!item.Val.CreatedAt.IsZero(), func() app.UI {
+			return app.P().Class("ph-dlg-note").Text("Angelegt am " + item.Val.CreatedAt.Format("02.01.2006, 15:04"))
+		}),
+	)
+}
+
+// ─ drag reorder ─
+
+// reorderTodos returns items with fromID moved directly above (after=false) or below
+// (after=true) toID. Returns nil when the move is a no-op or the ids do not resolve.
+func reorderTodos(items []store.Item[domain.TodoItem], fromID, toID string, after bool) []store.Item[domain.TodoItem] {
+	if fromID == "" || toID == "" || fromID == toID {
+		return nil
+	}
+	fromIdx := indexOfTodo(items, fromID)
+	if fromIdx < 0 {
+		return nil
+	}
+	moved := items[fromIdx]
+	rest := make([]store.Item[domain.TodoItem], 0, len(items)-1)
+	rest = append(rest, items[:fromIdx]...)
+	rest = append(rest, items[fromIdx+1:]...)
+
+	// Resolve the target AFTER the removal, so the index means the same thing whether
+	// the item was dragged up or down.
+	toIdx := indexOfTodo(rest, toID)
+	if toIdx < 0 {
+		return nil
+	}
+	if after {
+		toIdx++
+	}
+	out := make([]store.Item[domain.TodoItem], 0, len(items))
+	out = append(out, rest[:toIdx]...)
+	out = append(out, moved)
+	out = append(out, rest[toIdx:]...)
+	return out
+}
+
+// moveTodo drops the dragged todo directly above or below the row it was released on
+// — the same position the insertion marker showed during the drag — and persists the
+// new positions.
+func (t *todoTile) moveTodo(ctx app.Context, fromID, toID string, after bool) {
+	next := reorderTodos(t.todos, fromID, toID, after)
+	if next == nil {
 		return
 	}
-	moved := t.todos[fromIdx]
-	t.todos = append(t.todos[:fromIdx], t.todos[fromIdx+1:]...)
-	if fromIdx < toIdx {
-		toIdx--
-	}
-	rest := append([]store.Item[domain.TodoItem]{moved}, t.todos[toIdx:]...)
-	t.todos = append(t.todos[:toIdx], rest...)
+	t.todos = next
 	// Reassign 1-based positions and persist the ones that changed. New todos keep
 	// Order 0 so they sort above any manually-ordered items (newest-first default).
 	for i := range t.todos {
@@ -345,6 +454,29 @@ func (t *todoTile) reorder(ctx app.Context, fromID, toID string) {
 		})
 	}
 }
+
+// dropBelowMidpoint reports whether the pointer sits in the lower half of the row —
+// i.e. whether the dragged item should land after it rather than before.
+func dropBelowMidpoint(el app.Value, e app.Event) bool {
+	rect := el.Call("getBoundingClientRect")
+	h := rect.Get("height").Float()
+	if h == 0 {
+		return false
+	}
+	return (e.Get("clientY").Float()-rect.Get("top").Float())/h > 0.5
+}
+
+func indexOfTodo(items []store.Item[domain.TodoItem], id string) int {
+	for i, it := range items {
+		if it.ID == id {
+			return i
+		}
+	}
+	return -1
+}
+
+// endDrag clears the drag state, also when the drag was abandoned outside a row.
+func (t *todoTile) endDrag(ctx app.Context, _ app.Event) { t.dragID = "" }
 
 func (t *todoTile) openCount() int {
 	n := 0
@@ -368,7 +500,10 @@ func (t *todoTile) Render() app.UI {
 				}),
 			app.If(strings.TrimSpace(t.newText) != "", func() app.UI {
 				return app.Button().Class("ph-tile-btn ph-clear").Title("Feld leeren").Text("✕").
-					OnClick(func(ctx app.Context, _ app.Event) { t.newText = "" })
+					OnClick(func(ctx app.Context, _ app.Event) {
+						t.newText = ""
+						setInputValue(inputIn(ctx.JSSrc(), ".ph-todoform"), "")
+					})
 			}),
 			app.Button().Class("ph-btn").Disabled(t.busy).Text("+").OnClick(t.add),
 		),
@@ -384,6 +519,9 @@ func (t *todoTile) Render() app.UI {
 		app.If(t.loaded && len(t.todos) > 0, func() app.UI {
 			return app.Div().Class("ph-todofoot ph-muted").Text(fmt.Sprintf("%d offen · %d gesamt", t.openCount(), len(t.todos)))
 		}),
+		// Rendered last so it stacks above the list; it is fixed to the viewport, so
+		// the tile's size and its overflow clipping do not constrain it.
+		app.If(t.editing != "", t.editDialog),
 	)
 }
 
@@ -400,27 +538,6 @@ func (r *todoRow) CompoID() string { return r.Item.ID }
 
 func (r *todoRow) Render() app.UI {
 	t, it := r.t, r.Item
-	if t.editing == it.ID {
-		return app.Li().Class("ph-item ph-todoitem ph-todo-editing").Body(
-			app.Input().Class("ph-todoinput").Type("text").Value(t.editText).
-				OnInput(func(ctx app.Context, e app.Event) { t.editText = ctx.JSSrc().Get("value").String() }).
-				OnKeyDown(func(ctx app.Context, e app.Event) {
-					if e.Get("key").String() == "Enter" {
-						t.saveEdit(it.ID)(ctx, e)
-					}
-				}),
-			app.Label().Class("ph-muted").Text("Fällig").Body(
-				app.Input().Type("datetime-local").Value(t.editDue).
-					OnInput(func(ctx app.Context, e app.Event) { t.editDue = ctx.JSSrc().Get("value").String() }),
-			),
-			app.Label().Class("ph-muted").Text("Erinnerung").Body(
-				app.Input().Type("datetime-local").Value(t.editRemind).
-					OnInput(func(ctx app.Context, e app.Event) { t.editRemind = ctx.JSSrc().Get("value").String() }),
-			),
-			app.Button().Class("ph-tile-btn").Title("Speichern").Text("✓").OnClick(t.saveEdit(it.ID)),
-			app.Button().Class("ph-tile-btn").Title("Abbrechen").Text("✕").OnClick(t.cancelEdit),
-		)
-	}
 	cls := "ph-item ph-todoitem"
 	if it.Val.Done {
 		cls += " ph-todo-done"
@@ -429,14 +546,35 @@ func (r *todoRow) Render() app.UI {
 	if overdue {
 		cls += " ph-todo-overdue"
 	}
+	if t.dragID == it.ID {
+		cls += " ph-todo-dragging"
+	}
+	// Every drag event stops here. They would otherwise bubble to the tile, which is
+	// itself a drop target — and reordering a todo would light up the tile-rearrange
+	// overlay for a move that never happens. The insertion marker is drawn by the
+	// shell (initDropHint), not by re-rendering rows on every pointer move.
 	return app.Li().Class(cls).Draggable(true).
-		OnDragStart(func(ctx app.Context, _ app.Event) { t.dragID = it.ID }).
-		OnDragOver(func(ctx app.Context, e app.Event) { e.PreventDefault() }).
+		OnDragStart(func(ctx app.Context, e app.Event) {
+			e.Call("stopPropagation")
+			t.dragID = it.ID
+			// Tag the payload as a todo: the shell's drop hint keys off this to draw an
+			// insertion line instead of the tile-rearrange rectangle.
+			if dt := e.Get("dataTransfer"); dt.Truthy() {
+				dt.Call("setData", "application/x-ph-todo", it.ID)
+				dt.Set("effectAllowed", "move")
+			}
+		}).
+		OnDragOver(func(ctx app.Context, e app.Event) {
+			e.PreventDefault()
+			e.Call("stopPropagation")
+		}).
 		OnDrop(func(ctx app.Context, e app.Event) {
 			e.PreventDefault()
-			t.reorder(ctx, t.dragID, it.ID)
+			e.Call("stopPropagation")
+			t.moveTodo(ctx, t.dragID, it.ID, dropBelowMidpoint(ctx.JSSrc(), e))
 			t.dragID = ""
 		}).
+		OnDragEnd(t.endDrag).
 		Body(
 			app.Span().Class("ph-todo-drag").Title("Ziehen zum Umsortieren").Text("⠿"),
 			app.Input().Type("checkbox").Class("ph-todocheck").Checked(it.Val.Done).

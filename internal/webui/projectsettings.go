@@ -159,6 +159,10 @@ func (r *Root) saveProjectPath(ctx app.Context, raw string) {
 		return
 	}
 	id, st, nc := r.selected.ID, r.store, r.native
+	// Push the cleaned value back into the field: rendering it is not enough once the
+	// user has typed (see setInputValue), so a normalised or cleared path would keep
+	// showing the raw input.
+	setInputValue(inputIn(ctx.JSSrc(), ".ph-path-row"), dir)
 	r.projPath, r.projPathMsg = dir, "Wird gespeichert…"
 	ctx.Async(func() {
 		// Verify the directory really exists before writing it — a typo'd path would
