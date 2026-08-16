@@ -48,6 +48,37 @@ func TestClaudeTileParams(t *testing.T) {
 	}
 }
 
+func TestWindowTitle(t *testing.T) {
+	cases := []struct {
+		name string
+		ref  *domain.ProjectRef
+		want string
+	}{
+		{name: "home view", ref: nil, want: "ProjectHub"},
+		{name: "open project", ref: &domain.ProjectRef{Title: "Chattr"}, want: "Chattr · ProjectHub"},
+		{name: "padded title", ref: &domain.ProjectRef{Title: "  Homepage  "}, want: "Homepage · ProjectHub"},
+		{name: "untitled project", ref: &domain.ProjectRef{Title: "   "}, want: "ProjectHub"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := windowTitle(tc.ref); got != tc.want {
+				t.Fatalf("windowTitle = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSyncWindowTitleOnlyWritesOnChange(t *testing.T) {
+	// The render loop calls this on every pass, so it must be a no-op once the title
+	// matches — the DOM write is guarded by the cached value, not by the caller.
+	r := &Root{selected: &domain.ProjectRef{Title: "Chattr"}}
+	r.docTitle = "Chattr · ProjectHub"
+	r.syncWindowTitle() // no app.Window() call: would panic outside wasm if it wrote
+	if r.docTitle != "Chattr · ProjectHub" {
+		t.Fatalf("docTitle = %q, want it untouched", r.docTitle)
+	}
+}
+
 func TestSetParamClearsOnEmptyValue(t *testing.T) {
 	w := &Workspace{layout: domain.Layout{Root: leaf("pane-1")}}
 	if w.setParam("pane-1", "session_id", "sid-1") == nil {

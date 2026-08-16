@@ -119,6 +119,39 @@ type Root struct {
 
 	// new-project form: optional working directory chosen via the native folder picker.
 	newPath string
+
+	// docTitle is the window/tab title we last wrote (see syncWindowTitle), so the
+	// render loop only touches the DOM when the title actually changes.
+	docTitle string
+}
+
+// windowTitle names a window after what it shows: the open project first, so a
+// per-project window is identifiable in the taskbar, alt-tab and the window list at a
+// glance; plain "ProjectHub" on the home view.
+func windowTitle(p *domain.ProjectRef) string {
+	if p == nil {
+		return "ProjectHub"
+	}
+	title := strings.TrimSpace(p.Title)
+	if title == "" {
+		return "ProjectHub"
+	}
+	return title + " · ProjectHub"
+}
+
+// syncWindowTitle writes the current title into the document. Electron mirrors
+// document.title into the window's title bar (page-title-updated), so this is what
+// names the OS window — no shell bridge needed, and it works in the browser build too.
+// Driven from Render so every path that opens, switches or closes a project is covered.
+func (r *Root) syncWindowTitle() {
+	want := windowTitle(r.selected)
+	if want == r.docTitle {
+		return
+	}
+	r.docTitle = want
+	if doc := app.Window().Get("document"); doc.Truthy() {
+		doc.Set("title", want)
+	}
 }
 
 // accentColor returns the chosen app accent, or the default when none is set yet.
@@ -130,6 +163,7 @@ func (r *Root) accentColor() string {
 }
 
 func (r *Root) Render() app.UI {
+	r.syncWindowTitle()
 	if !r.unlocked {
 		return r.loginView()
 	}

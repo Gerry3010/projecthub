@@ -71,6 +71,13 @@ async function main() {
   check((await viewOf(page)).view === "workspace", "click opens the project in the same window");
   check(app.windows().length === 1, `no window spawned by the click (windows=${app.windows().length})`);
 
+  // The window has to say WHICH project it shows — that is what makes several
+  // ProjectHub windows tellable apart in the taskbar / alt-tab.
+  const windowTitles = () =>
+    app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().map((w) => w.getTitle()));
+  const openTitle = (await windowTitles())[0];
+  check(openTitle === `${name} \u00b7 ProjectHub`, `window titled after the project ("${openTitle}")`);
+
   // ── 2. menu action → the project moves into a window of its own ───────────
   await app.evaluate(({ BrowserWindow }) => {
     BrowserWindow.getAllWindows()[0].webContents.send("ph-menu", { op: "new-window" });
@@ -89,6 +96,13 @@ async function main() {
   await page.waitForTimeout(1500);
   const firstView = await viewOf(page);
   check(firstView.view === "home", `source window returned to the project list (view=${firstView.view})`);
+
+  const titles = await windowTitles();
+  check(titles.includes("ProjectHub"), `the window back on home drops the project name (${JSON.stringify(titles)})`);
+  check(
+    titles.includes(`${name} \u00b7 ProjectHub`),
+    `the project's own window carries its name (${JSON.stringify(titles)})`,
+  );
 
   // ── 4. the menu item exists with an accelerator ───────────────────────────
   const item = await app.evaluate(({ Menu }) => {
