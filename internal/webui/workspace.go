@@ -43,7 +43,8 @@ type Workspace struct {
 	Native *nativeclient.Client // nil in the hosted browser build
 	// RegisterClaudeOpener lets the app-wide Claude sidebar (Root) open a Claude
 	// terminal in THIS workspace; called once on mount with a ready-to-use opener.
-	RegisterClaudeOpener func(open func(ctx app.Context, cwd, prompt string))
+	// A non-empty sessionID continues that conversation (see claudeTileParams).
+	RegisterClaudeOpener func(open func(ctx app.Context, cwd, prompt, sessionID string))
 	// OnColor notifies the parent (Root) that this project's accent changed, so it can
 	// keep its project list (and thus the rail dot) in sync. nil in the hosted build.
 	OnColor func(color string)
@@ -112,14 +113,17 @@ func (w *Workspace) OnMount(ctx app.Context) {
 		}
 		return nil
 	}))
-	// Persist a terminal tile's live PTY id so a renderer reload can reattach to the
-	// still-running session (scrollback replayed by the sidecar) instead of starting a
-	// fresh one. Args: paneID, ptyID.
-	app.Window().Set("phPtyState", app.FuncOf(func(_ app.Value, args []app.Value) any {
-		if len(args) >= 2 {
-			paneID, ptyID := args[0].String(), args[1].String()
+	// Persist one instance-scoped param of a tile from its JS island. Used by the
+	// terminal for pty_id (reattach to the still-running session after a renderer
+	// reload, scrollback replayed by the sidecar), for session_id (the pinned Claude
+	// conversation this tile owns, so a restart resumes it instead of opening a second,
+	// empty one), and to clear a prompt once it has been sent. Args: paneID, key, value
+	// — an empty value deletes the key.
+	app.Window().Set("phTileParam", app.FuncOf(func(_ app.Value, args []app.Value) any {
+		if len(args) >= 3 {
+			paneID, key, val := args[0].String(), args[1].String(), args[2].String()
 			ctx.Dispatch(func(app.Context) {
-				w.setParam(paneID, "pty_id", ptyID)
+				w.setParam(paneID, key, val)
 				w.persistSoon()
 			})
 		}
@@ -164,11 +168,11 @@ func (w *Workspace) OnMount(ctx app.Context) {
 	w.startControlLoop(ctx) // MCP: let Claude Code drive this workspace
 	// Let the app-wide Claude sidebar open Claude terminals in this workspace.
 	if w.RegisterClaudeOpener != nil {
-		w.RegisterClaudeOpener(func(ctx app.Context, cwd, prompt string) {
+		w.RegisterClaudeOpener(func(ctx app.Context, cwd, prompt, sessionID string) {
 			if cwd == "" {
 				cwd = w.Ref.LocalPath
 			}
-			w.addTile(domain.TileTerminal, map[string]string{"cwd": cwd, "cmd": "claude", "prompt": prompt})
+			w.addTile(domain.TileTerminal, claudeTileParams(cwd, prompt, sessionID))
 		})
 	}
 	ctx.Async(func() {
@@ -531,15 +535,15 @@ func (w *Workspace) renderTileBody(n *domain.LayoutNode) app.UI {
 	case domain.TileSessions:
 		return &sessionsTile{Store: w.Store, Native: w.Native, FolderID: w.Ref.FolderID, Cwd: w.Ref.LocalPath,
 			OpenTerminal: func(ctx app.Context, cwd, sessionID string) {
-				w.addTile(domain.TileTerminal, map[string]string{"cwd": cwd, "session_id": sessionID})
+				w.addTile(domain.TileTerminal, claudeTileParams(cwd, "", sessionID))
 			}}
 	case domain.TileTabs:
 		return &tabsTile{Native: w.Native, ProjectID: w.Ref.ID}
 	case domain.TileClaude:
 		pane := n.PaneID
 		return &claudeTile{Native: w.Native, Cwd: w.Ref.LocalPath,
-			OpenClaude: func(ctx app.Context, cwd, prompt string) {
-				w.addTile(domain.TileTerminal, map[string]string{"cwd": cwd, "cmd": "claude", "prompt": prompt})
+			OpenClaude: func(ctx app.Context, cwd, prompt, sessionID string) {
+				w.addTile(domain.TileTerminal, claudeTileParams(cwd, prompt, sessionID))
 			},
 			OnActiveChat: func(title string) {
 				// Cold-path: dispatch on the workspace ctx (captured in OnMount, always
@@ -596,11 +600,32 @@ func focusIsland(paneID string) {
 	}
 }
 
-// setParam updates one leaf param in place and returns the leaf (nil if gone).
+// claudeTileParams builds the params of a terminal tile that runs Claude Code.
+// sessionID continues an existing conversation ("" lets the island mint and pin a new
+// one on start, so the tile keeps talking to the same session across restarts);
+// prompt is a one-shot start argument the island clears once it has been sent.
+func claudeTileParams(cwd, prompt, sessionID string) map[string]string {
+	p := map[string]string{"cwd": cwd, "cmd": "claude"}
+	if prompt != "" {
+		p["prompt"] = prompt
+	}
+	if sessionID != "" {
+		p["session_id"] = sessionID
+	}
+	return p
+}
+
+// setParam updates one leaf param in place and returns the leaf (nil if gone). An
+// empty value removes the key instead of storing a blank one, so a spent prompt or a
+// dropped pty id leaves no trace in the persisted layout.
 func (w *Workspace) setParam(paneID, key, val string) *domain.LayoutNode {
 	leaf := findLeaf(w.layout.Root, paneID)
 	if leaf == nil {
 		return nil
+	}
+	if val == "" {
+		delete(leaf.Params, key)
+		return leaf
 	}
 	if leaf.Params == nil {
 		leaf.Params = map[string]string{}
@@ -1089,10 +1114,9 @@ func cloneParams(p map[string]string) map[string]string {
 func tileLabel(n *domain.LayoutNode) string {
 	switch n.Type {
 	case domain.TileTerminal:
-		if n.Params["session_id"] != "" {
-			return "Claude · Resume"
-		}
-		if n.Params["cmd"] == "claude" {
+		// A session id no longer means "resumed from the session list" — every Claude
+		// terminal pins one (claudeTileParams), so it only tells Claude from a shell.
+		if n.Params["cmd"] == "claude" || n.Params["session_id"] != "" {
 			return "Claude"
 		}
 		return "Terminal"

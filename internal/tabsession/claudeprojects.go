@@ -130,7 +130,7 @@ func scanProjectDir(dir string) (ClaudeProject, bool) {
 	}
 
 	// fallbackCwd "" so an unresolved cwd stays empty and we can skip it.
-	cs, err := parseClaudeSession(newest, "")
+	cs, _, err := parseClaudeSession(newest, "")
 	if err != nil || cs.Cwd == "" {
 		return ClaudeProject{}, false
 	}

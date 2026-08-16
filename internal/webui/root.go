@@ -99,7 +99,7 @@ type Root struct {
 	// registered by the active Workspace so the sidebar's "start Claude" opens a
 	// terminal tile there; nil on the home view (no workspace → starter disabled).
 	chatOpen     bool
-	claudeOpener func(ctx app.Context, cwd, prompt string)
+	claudeOpener func(ctx app.Context, cwd, prompt, sessionID string)
 
 	// showSettings overlays the global settings screen (left rail gear). Account-wide;
 	// works over both the home view and an open workspace. settingsTab is the active
@@ -137,7 +137,7 @@ func (r *Root) Render() app.UI {
 	if r.selected != nil {
 		sel := r.selected
 		main = &Workspace{Store: r.store, Ref: *sel, Back: r.closeProject, Native: r.native,
-			RegisterClaudeOpener: func(open func(ctx app.Context, cwd, prompt string)) { r.claudeOpener = open },
+			RegisterClaudeOpener: func(open func(ctx app.Context, cwd, prompt, sessionID string)) { r.claudeOpener = open },
 			OnColor: func(color string) {
 				sel.Color = color // update the open project's ref
 				for i := range r.projects {

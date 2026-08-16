@@ -289,6 +289,16 @@ function applyTerminalBell(kind: string, volume: number): void {
 // reattach is refused here for an id another live pane already holds.
 const ptyOwners = new Map<string, string>();
 
+// isCopyChord reports whether a keydown means "copy the terminal selection":
+// Ctrl+Shift+C everywhere, plus Cmd+C on macOS (where Ctrl+C is SIGINT and Cmd+C is
+// the system-wide copy). Kept separate from the key handler so it stays readable.
+function isCopyChord(e: KeyboardEvent): boolean {
+  if ((e.key || "").toLowerCase() !== "c") return false;
+  if (e.ctrlKey && e.shiftKey && !e.altKey) return true;
+  const mac = /mac/i.test(navigator.platform || "") || /Mac OS X/.test(navigator.userAgent || "");
+  return mac && e.metaKey && !e.ctrlKey && !e.altKey;
+}
+
 function mountTerminal(el: HTMLElement, params: Record<string, string>, paneID = ""): Island {
   const nat = phNative();
   const term = new Terminal({
@@ -312,11 +322,27 @@ function mountTerminal(el: HTMLElement, params: Record<string, string>, paneID =
   };
   (el as any)._fit = doFit;
   (el as any)._focus = () => term.focus();
+  // The xterm instance, next to the other island hooks: the E2E driver needs a way to
+  // make a selection that does not depend on pixel geometry (scripts/claudeterm.mjs).
+  (el as any)._term = term;
 
   let ws: WebSocket | null = null;
   let closed = false;
   let ptyId = ""; // function-scoped so cleanup can DELETE (kill) the session on tile close
   const ro = new ResizeObserver(() => doFit());
+
+  // setTileParam writes one instance-scoped param (pty_id, session_id, the spent
+  // prompt) both to the live params and to the persisted layout, so a restart restores
+  // this very session instead of an equivalent-looking new one. "" clears the key.
+  const setTileParam = (key: string, value: string) => {
+    if (value) params[key] = value;
+    else delete params[key];
+    try {
+      (window as any).phTileParam?.(paneID, key, value);
+    } catch {
+      /* no go-app bridge (hosted browser build) */
+    }
+  };
 
   // Word-navigation: for the configured modifier + Arrow/Backspace/Delete, send the
   // classic readline ESC sequences so word-jump/-delete works predictably no matter
@@ -324,6 +350,16 @@ function mountTerminal(el: HTMLElement, params: Record<string, string>, paneID =
   // to xterm's default handling.
   term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
     if (e.type !== "keydown") return true;
+    // Copy: Ctrl+Shift+C (Cmd+C on macOS). Plain Ctrl+C must stay SIGINT, so the
+    // terminal needs its own chord — and nothing else provides one: pasting works
+    // because Chromium turns Ctrl+Shift+V into a paste event on xterm's textarea, but
+    // there is no matching native copy for a canvas-rendered selection.
+    if (isCopyChord(e)) {
+      const sel = term.getSelection();
+      if (sel) void navigator.clipboard?.writeText(sel).catch(() => {});
+      e.preventDefault(); // also keeps Ctrl+Shift+C from opening DevTools' inspector
+      return false;
+    }
     const mod = termWordMod === "alt" ? e.altKey : termWordMod === "ctrl" ? e.ctrlKey : e.metaKey;
     if (!mod) return true;
     let seq = "";
@@ -410,27 +446,34 @@ function mountTerminal(el: HTMLElement, params: Record<string, string>, paneID =
           if (alive) ptyId = params.pty_id;
         }
         if (!ptyId) {
+          // A Claude terminal PINS its session id: without one, every start (and every
+          // restart of the app, where the PTY is gone) opened a brand-new Claude session
+          // right next to the one this tile had been talking to — the duplicate,
+          // prompt-less twin in `claude --resume`'s list. With the id minted up front the
+          // sidecar starts `claude --session-id <id>` once and resumes exactly that
+          // conversation afterwards.
+          if (params.cmd === "claude" && !params.session_id) {
+            setTileParam("session_id", crypto.randomUUID());
+          }
           if (params.session_id) {
-            ptyId = await postJSON(nat, "/native/claude/resume", { cwd, session_id: params.session_id, cols, rows }).then(
-              (r) => r.pty_id,
-            );
+            // The prompt is a one-shot start argument (the Claude tile hands one over);
+            // replaying it on every restore would re-ask the same question forever.
+            const prompt = params.prompt || "";
+            ptyId = await postJSON(nat, "/native/claude/resume", {
+              cwd,
+              session_id: params.session_id,
+              prompt,
+              cols,
+              rows,
+            }).then((r) => r.pty_id);
+            if (prompt) setTileParam("prompt", "");
           } else {
-            // A "prompt" param (set by the Claude tile's starter) is forwarded as the
-            // sole CLI arg so `claude "<prompt>"` opens straight into that session.
-            const args = params.cmd === "claude" && params.prompt ? [params.prompt] : [];
-            ptyId = await postJSON(nat, "/native/pty", { cwd, cmd: params.cmd || "", args, cols, rows }).then(
+            ptyId = await postJSON(nat, "/native/pty", { cwd, cmd: params.cmd || "", args: [], cols, rows }).then(
               (r) => r.pty_id,
             );
           }
           // Persist the new id so a later reload can reattach to this session.
-          if (ptyId && ptyId !== params.pty_id) {
-            params.pty_id = ptyId;
-            try {
-              (window as any).phPtyState?.(paneID, ptyId);
-            } catch {
-              /* no go-app bridge */
-            }
-          }
+          if (ptyId && ptyId !== params.pty_id) setTileParam("pty_id", ptyId);
         }
       } catch (e) {
         term.writeln(`\x1b[31mTerminal-Start fehlgeschlagen: ${e}\x1b[0m`);

@@ -233,14 +233,17 @@ func (s *Server) claudeTasks(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, tasks)
 }
 
-// claudeResume opens a PTY running `claude --resume <sessionId>` in cwd and returns
-// its pty id; the client then attaches a WebSocket to stream it. The resume command
-// is defined once in internal/local (ResumeCommand) so the embedded and external
-// terminal paths agree.
+// claudeResume opens a PTY running Claude Code on a KNOWN session id in cwd and
+// returns its pty id; the client then attaches a WebSocket to stream it. An id whose
+// transcript exists is resumed, one that does not exist yet is started and pinned to
+// that id — that is how a terminal tile stays on its own conversation across restarts
+// instead of leaving an unused session behind every time. The commands are defined
+// once in internal/local (SessionCommand) so all launch paths agree.
 func (s *Server) claudeResume(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Cwd       string `json:"cwd"`
 		SessionID string `json:"session_id"`
+		Prompt    string `json:"prompt"` // optional: sent as the opening message
 		Cols      uint16 `json:"cols"`
 		Rows      uint16 `json:"rows"`
 	}
@@ -248,7 +251,7 @@ func (s *Server) claudeResume(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	name, args := local.ResumeCommand(req.SessionID)
+	name, args := local.SessionCommand(req.SessionID, req.Prompt, tabsession.HasClaudeSession(req.Cwd, req.SessionID))
 	name, args = local.DecorateClaude(name, args) // register the projecthub MCP + resolve claude
 	id, err := s.pty.Open(ptyhost.OpenRequest{
 		Cwd: req.Cwd, Cmd: name, Args: args, Cols: req.Cols, Rows: req.Rows,

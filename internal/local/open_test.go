@@ -10,6 +10,37 @@ import (
 	"testing"
 )
 
+func TestSessionCommand(t *testing.T) {
+	cases := []struct {
+		name        string
+		sid, prompt string
+		exists      bool
+		want        []string
+	}{
+		{name: "existing transcript resumes", sid: "sid-1", exists: true,
+			want: []string{"--resume", "sid-1"}},
+		{name: "unknown id starts pinned", sid: "sid-2", exists: false,
+			want: []string{"--session-id", "sid-2"}},
+		{name: "prompt is the positional arg", sid: "sid-3", prompt: "mach was", exists: true,
+			want: []string{"--resume", "sid-3", "mach was"}},
+		{name: "pinned start with prompt", sid: "sid-4", prompt: "los", exists: false,
+			want: []string{"--session-id", "sid-4", "los"}},
+		{name: "no id is a plain start", sid: "", exists: false, want: nil},
+		{name: "no id but a prompt", sid: "", prompt: "hi", exists: true, want: []string{"hi"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			name, args := SessionCommand(tc.sid, tc.prompt, tc.exists)
+			if name != "claude" {
+				t.Fatalf("name = %q, want claude", name)
+			}
+			if !slices.Equal(args, tc.want) {
+				t.Fatalf("args = %v, want %v", args, tc.want)
+			}
+		})
+	}
+}
+
 func TestChatCommandNewSession(t *testing.T) {
 	name, args := ChatCommand("hallo", "du bist X", "sid-123", false)
 	if name != "claude" {

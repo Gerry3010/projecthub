@@ -37,9 +37,11 @@ import (
 // already relies on.
 type claudeTile struct {
 	app.Compo
-	Native     *nativeclient.Client // nil in the hosted (non-Electron) build
-	Cwd        string
-	OpenClaude func(ctx app.Context, cwd, prompt string)
+	Native *nativeclient.Client // nil in the hosted (non-Electron) build
+	Cwd    string
+	// OpenClaude starts a Claude terminal tile: prompt is sent on open, sessionID (the
+	// chat selected in the list, "" for a new one) decides continue-vs-start.
+	OpenClaude func(ctx app.Context, cwd, prompt, sessionID string)
 	// OnActiveChat reports the currently open chat's title up to the tile chrome so the
 	// tile toolbar can show which Claude chat is active (nil for the embedded sidebar).
 	OnActiveChat func(title string)
@@ -175,7 +177,9 @@ func (t *claudeTile) submitPrompt(ctx app.Context, _ app.Event) {
 		if t.OpenClaude == nil {
 			return
 		}
-		t.OpenClaude(ctx, t.Cwd, t.prompt)
+		// Continue the chat that is open in the tile instead of starting a second one
+		// beside it — picking a session and then typing means "go on here".
+		t.OpenClaude(ctx, t.Cwd, t.prompt, t.selected)
 		t.prompt = ""
 		return
 	}

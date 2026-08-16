@@ -59,6 +59,30 @@ type ccLine struct {
 	Message     json.RawMessage `json:"message"`
 }
 
+// ClaudeSessionFile returns the transcript path Claude Code uses for one session id in
+// a working directory. The file only exists once the session has actually run.
+func ClaudeSessionFile(cwd, sessionID string) (string, error) {
+	base, err := ClaudeProjectsDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(base, encodeCwd(cwd), sessionID+".jsonl"), nil
+}
+
+// HasClaudeSession reports whether a session id already has a transcript in cwd — i.e.
+// whether it can be resumed (`--resume`) or still has to be started (`--session-id`).
+func HasClaudeSession(cwd, sessionID string) bool {
+	if cwd == "" || sessionID == "" {
+		return false
+	}
+	path, err := ClaudeSessionFile(cwd, sessionID)
+	if err != nil {
+		return false
+	}
+	fi, err := os.Stat(path)
+	return err == nil && !fi.IsDir()
+}
+
 // ScanClaudeSessions returns a CodeSession reference for every Claude Code session
 // recorded for the given working directory, newest first. The title prefers the
 // transcript's ai-title, falling back to the first (non-sidechain) user prompt.
@@ -76,9 +100,16 @@ func ScanClaudeSessions(cwd string) ([]domain.CodeSession, error) {
 
 	var sessions []domain.CodeSession
 	for _, path := range matches {
-		cs, err := parseClaudeSession(path, cwd)
+		cs, msgs, err := parseClaudeSession(path, cwd)
 		if err != nil {
 			// Skip unreadable/partial transcripts rather than failing the whole scan.
+			continue
+		}
+		if msgs == 0 {
+			// A transcript without a single message is a session that was created but
+			// never talked to (Claude Code writes its title/name line before the first
+			// prompt). Listing those means showing a chat's empty twin right next to it,
+			// and "resuming" it lands in an empty conversation — so they stay hidden.
 			continue
 		}
 		sessions = append(sessions, cs)
@@ -90,11 +121,13 @@ func ScanClaudeSessions(cwd string) ([]domain.CodeSession, error) {
 }
 
 // parseClaudeSession reads a single <sessionId>.jsonl transcript into a CodeSession.
-// The session id comes from the filename (authoritative for `claude --resume`).
-func parseClaudeSession(path, fallbackCwd string) (domain.CodeSession, error) {
+// The session id comes from the filename (authoritative for `claude --resume`). The
+// second return value is the number of conversation messages, which tells an actual
+// chat apart from a session that only ever got its metadata line (see ScanClaudeSessions).
+func parseClaudeSession(path, fallbackCwd string) (domain.CodeSession, int, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return domain.CodeSession{}, err
+		return domain.CodeSession{}, 0, err
 	}
 	defer f.Close()
 
@@ -103,6 +136,7 @@ func parseClaudeSession(path, fallbackCwd string) (domain.CodeSession, error) {
 		Cwd:       fallbackCwd,
 	}
 	var firstPrompt string
+	msgs := 0
 
 	sc := bufio.NewScanner(f)
 	// Transcript lines can be long (large tool results); allow up to 8 MiB per line.
@@ -125,12 +159,15 @@ func parseClaudeSession(path, fallbackCwd string) (domain.CodeSession, error) {
 		if ts := parseTime(l.Timestamp); !ts.IsZero() && ts.After(cs.LastActive) {
 			cs.LastActive = ts
 		}
+		if l.Type == "user" || l.Type == "assistant" {
+			msgs++
+		}
 		if firstPrompt == "" && l.Type == "user" && !l.IsSidechain {
 			firstPrompt = firstUserText(l.Message)
 		}
 	}
 	if err := sc.Err(); err != nil {
-		return domain.CodeSession{}, err
+		return domain.CodeSession{}, 0, err
 	}
 
 	if cs.Title == "" {
@@ -139,7 +176,7 @@ func parseClaudeSession(path, fallbackCwd string) (domain.CodeSession, error) {
 	if cs.Title == "" {
 		cs.Title = cs.SessionID
 	}
-	return cs, nil
+	return cs, msgs, nil
 }
 
 func parseTime(s string) time.Time {

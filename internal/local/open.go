@@ -67,6 +67,26 @@ func ResumeCommand(sessionID string) (name string, args []string) {
 	return "claude", []string{"--resume", sessionID}
 }
 
+// SessionCommand returns the command that opens a terminal Claude session with a KNOWN
+// id: --resume when that transcript already exists, --session-id to pin a brand-new
+// session to the id the caller minted. Pinning is what keeps a tile on one conversation
+// — plain `claude` would start a fresh, nameless session on every app restart and leave
+// its predecessor behind as a duplicate in the resume list. A non-empty prompt is passed
+// positionally, so the TUI opens with it already sent.
+func SessionCommand(sessionID, prompt string, exists bool) (name string, args []string) {
+	if sessionID == "" { // nothing to pin — behave like a plain Claude start
+		name, args = "claude", nil
+	} else if exists {
+		name, args = ResumeCommand(sessionID)
+	} else {
+		name, args = "claude", []string{"--session-id", sessionID}
+	}
+	if prompt != "" {
+		args = append(args, prompt)
+	}
+	return name, args
+}
+
 // ChatCommand returns the command + args for one headless Claude chat turn, used by
 // the embedded sidebar chat (no terminal). It runs in print mode (-p) and persists to
 // the normal session transcript (~/.claude/projects/<cwd>/<sessionId>.jsonl), so the

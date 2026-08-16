@@ -35,9 +35,12 @@ func TestParseClaudeSession(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cs, err := parseClaudeSession(path, "/fallback")
+	cs, msgs, err := parseClaudeSession(path, "/fallback")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if msgs != 2 {
+		t.Errorf("msgs = %d, want 2 (one user + one assistant)", msgs)
 	}
 	if cs.SessionID != "sess-1" {
 		t.Errorf("SessionID = %q, want sess-1", cs.SessionID)
@@ -60,7 +63,7 @@ func TestParseClaudeSessionTitleFallback(t *testing.T) {
 	if err := os.WriteFile(path, []byte(line), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cs, err := parseClaudeSession(path, "/tmp/p")
+	cs, _, err := parseClaudeSession(path, "/tmp/p")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,6 +91,31 @@ func TestScanClaudeSessions(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].SessionID != "sess-1" {
 		t.Fatalf("ScanClaudeSessions = %+v, want one session sess-1", got)
+	}
+
+	// A session that only ever got its metadata line is the empty twin of a real chat
+	// (Claude Code writes the title before the first prompt) — it must stay hidden.
+	ghost := `{"type":"ai-title","sessionId":"sess-ghost","aiTitle":"Refactor the parser"}` + "\n" +
+		`{"type":"agent-name","sessionId":"sess-ghost","agentName":"Refactor the parser"}` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "sess-ghost.jsonl"), []byte(ghost), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err = ScanClaudeSessions(cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].SessionID != "sess-1" {
+		t.Fatalf("ScanClaudeSessions = %+v, want only the session with messages", got)
+	}
+
+	// The transcript files decide what can be resumed vs. has to be started.
+	if !HasClaudeSession(cwd, "sess-1") {
+		t.Error("HasClaudeSession = false for an existing transcript")
+	}
+	for _, tc := range [][2]string{{cwd, "sess-nope"}, {"", "sess-1"}, {cwd, ""}} {
+		if HasClaudeSession(tc[0], tc[1]) {
+			t.Errorf("HasClaudeSession(%q, %q) = true, want false", tc[0], tc[1])
+		}
 	}
 
 	// A non-existent project dir must yield no sessions, not an error.
