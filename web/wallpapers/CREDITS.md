@@ -1,43 +1,35 @@
-# Wallpaper-Presets — Quellen & Lizenzen
+# Wallpaper-Presets — Herkunft & Lizenzen
 
-Alle gebündelten Hintergrundbilder stammen aus der **NASA Image and Video Library**
-(<https://images.nasa.gov>). NASA-Bildmaterial ist grundsätzlich **gemeinfrei / Public
-Domain** und darf ohne Einschränkung verwendet werden (siehe NASA Media Usage
-Guidelines, <https://www.nasa.gov/nasa-brand-center/images-and-media/>). Damit ist das
-Bündeln in diesem AGPL-lizenzierten Repository unproblematisch.
+Die Presets sind **selbst erzeugte Bilder**: generiert am 20.08.2026 über ElevenLabs
+(Modell **GPT Image 2**, 16:9, 2K, Qualität „Medium") aus eigenen Prompts. Die Ausgaben
+gehören dem erzeugenden Account; das Bündeln in diesem AGPL-lizenzierten Repository ist
+damit unproblematisch. Kein Bild enthält Text, Logos, Personen oder Marken.
 
-Bilder wurden auf max. 1920 px (Längsseite) skaliert, Metadaten entfernt und als JPEG
-(Qualität 82) gespeichert; Thumbnails unter `thumbs/` (max. 480 px, Qualität 78).
+Bilder auf max. 1920 px (Längsseite) skaliert, Metadaten entfernt, JPEG (Qualität 82);
+Thumbnails unter `thumbs/` (max. 480 px, Qualität 78).
 
-| Datei | Motiv | NASA-Asset | Instrument / Quelle |
-|-------|-------|------------|---------------------|
-| `space-carina.jpg` | Carina-Nebel („Cosmic Cliffs") | `carina_nebula` | JWST (NASA/ESA/CSA/STScI) |
-| `space-pillars.jpg` | Säulen der Schöpfung | `PIA25433` | JWST (NASA/ESA/CSA/STScI) |
-| `space-deepfield.jpg` | Webb's First Deep Field (SMACS 0723) | `webb_first_deep_field` | JWST (NASA/ESA/CSA/STScI) |
-| `science-earthnight.jpg` | Erde bei Nacht („Black Marble") | `GSFC_20171208_Archive_e002131` | Suomi NPP / VIIRS (NASA GSFC) |
-| `science-aurora.jpg` | Polarlicht von der ISS | `iss072e159172` | ISS Expedition 72 (NASA) |
-| `nature-mountains.jpg` | Bergkette aus dem Orbit | `iss072e398041` | ISS Expedition 72 (NASA) |
-| `nature-dunes.jpg` | Namib-Wüste, Namibia | `PIA17632` | NASA/JPL |
-| `sea-reef.jpg` | Great Barrier Reef, Australien | `sts048-151-250` | Space Shuttle STS-48 (NASA) |
-| `sea-sunglint.jpg` | Ozean im Sonnenlicht (Sunglint) | `iss022e024557` | ISS Expedition 22 (NASA) |
+Gestalterische Vorgabe für alle Prompts: **sehr dunkel, gedämpft, ruhige Mitte** — der
+Hintergrund soll hinter den Tiles liegen, nicht mit ihnen konkurrieren.
 
-Asset-URL-Schema: `https://images-assets.nasa.gov/image/<ASSET>/<ASSET>~large.jpg`.
+| Datei | Motiv | Prompt (gekürzt) |
+|-------|-------|------------------|
+| `abstract-aurora-1/2.jpg` | Nordlicht-Bänder | flowing ribbons of light, deep indigo and teal on a near-black ground, aurora seen through frosted glass |
+| `abstract-obsidian-1/2.jpg` | Obsidian | macro of black volcanic obsidian glass, faint iridescent oil-slick sheen, single cold rim light |
+| `space-nebula-1/2.jpg` | Stiller Nebel | quiet deep-space nebula, dim dusty magenta and cyan at the edges, vast black centre, no bright core |
+| `space-orbit.jpg` | Orbit-Sonnenaufgang | thin curved limb of a dark planet, band of blue airglow, black space, one soft sunrise glow |
+| `nature-dusklake-1/2.jpg` | See in der Dämmerung | still alpine lake at dusk, deep teal water reflecting near-black pine forest, low cloud between the slopes |
+| `nature-ridges-1/2.jpg` | Nebelgrate | layered mountain ridges fading into fog at blue hour, cold blue-grey monochrome |
+| `code-circuit-1/2.jpg` | Platine | extreme macro of a dark circuit board at night, copper traces in faint warm amber, tiny bokeh lights |
+| `code-terminal-1/2.jpg` | Terminalregen | vertical streaks of phosphor green and cold teal, heavy bokeh so no characters are readable |
 
-## Weitere Presets — Wikimedia Commons (CC0 / Public Domain)
+## Verbliebenes Fremdmaterial
 
-Ergänzt über die Wikimedia-Commons-API, hart auf **CC0** bzw. **Public Domain** gefiltert
-(Lizenz aus `extmetadata`). Ebenfalls bundling-sicher unter der AGPL des Repos.
+| Datei | Motiv | Lizenz | Quelle |
+|-------|-------|--------|--------|
+| `nature-lake.jpg` | Bergsee (türkis) | CC0 | Wikimedia Commons — Turquoise mountain lake (Unsplash) |
 
-| Datei | Motiv | Lizenz | Commons-Datei |
-|-------|-------|--------|---------------|
-| `nature-forest.jpg` | Nebelwald | CC0 | Misty Forest (227339925) |
-| `nature-lake.jpg` | Bergsee (türkis) | CC0 | Turquoise mountain lake (Unsplash) |
-| `nature-autumn.jpg` | Herbstwald | Public Domain | Fall Colors 2019 (USFS, 20191010-FS-R9RO-GER-006) |
-| `nature-valley.jpg` | Grünes Tal | Public Domain | Green Mountain Campground (48104515632) |
-| `city-night.jpg` | Stadt bei Nacht | CC0 | Dubai skyscrapers at night 2011 |
-
-Quelle jeweils `https://commons.wikimedia.org/wiki/File:<Commons-Datei>`.
-
-Neue Presets: Bild herunterladen, auf ~2560 px skalieren (`magick <src> -resize
-'2560x2560>' -strip -quality 82 <out>.jpg`), Thumbnail erzeugen, hier dokumentieren
-und in `internal/webui/wallpapers.go` eintragen.
+Die früheren NASA- und Commons-Presets (Carina-Nebel, Säulen der Schöpfung, Webb Deep
+Field, Erde bei Nacht, Polarlicht, Berge von oben, Namib-Wüste, Nebelwald, Herbstwald,
+Grünes Tal, Great Barrier Reef, Sunglint, Stadt bei Nacht) wurden am 20.08.2026 entfernt.
+Wer noch auf eines davon zeigt, landet über `retiredPresets` (`internal/webui/wallpapers.go`)
+auf dem nächstgelegenen neuen Preset.

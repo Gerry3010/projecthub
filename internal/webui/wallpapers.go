@@ -17,12 +17,12 @@ package webui
 
 // wallpaper is one bundled preset background image, served as a same-origin static
 // asset from web/wallpapers/. Referenced from a domain.Background as "preset:<File>".
-// Provenance + licenses are documented in web/wallpapers/CREDITS.md — every image is
-// public domain / CC0 so bundling is safe under the repo's AGPL license.
+// Provenance is documented in web/wallpapers/CREDITS.md — the set is self-generated
+// (plus one CC0 image), so bundling is safe under the repo's AGPL license.
 type wallpaper struct {
 	Key      string // stable id (== File without extension)
 	Label    string // human name shown in the picker
-	Category string // "Space" | "Wissenschaft" | "Natur" | "Meer"
+	Category string // "Abstrakt" | "Space" | "Natur" | "Code"
 	File     string // full-size file under web/wallpapers/
 	Thumb    string // thumbnail under web/wallpapers/thumbs/
 }
@@ -30,20 +30,22 @@ type wallpaper struct {
 // wallpapers is the curated preset set. Ordered by category so the picker groups them
 // naturally (wallpaperCategories preserves this order).
 var wallpapers = []wallpaper{
-	{"space-carina", "Carina-Nebel", "Space", "space-carina.jpg", "thumbs/space-carina.jpg"},
-	{"space-pillars", "Säulen der Schöpfung", "Space", "space-pillars.jpg", "thumbs/space-pillars.jpg"},
-	{"space-deepfield", "Webb Deep Field", "Space", "space-deepfield.jpg", "thumbs/space-deepfield.jpg"},
-	{"science-earthnight", "Erde bei Nacht", "Wissenschaft", "science-earthnight.jpg", "thumbs/science-earthnight.jpg"},
-	{"science-aurora", "Polarlicht (ISS)", "Wissenschaft", "science-aurora.jpg", "thumbs/science-aurora.jpg"},
-	{"nature-mountains", "Berge von oben", "Natur", "nature-mountains.jpg", "thumbs/nature-mountains.jpg"},
-	{"nature-dunes", "Namib-Wüste", "Natur", "nature-dunes.jpg", "thumbs/nature-dunes.jpg"},
-	{"nature-forest", "Nebelwald", "Natur", "nature-forest.jpg", "thumbs/nature-forest.jpg"},
+	{"abstract-aurora-1", "Nordlicht", "Abstrakt", "abstract-aurora-1.jpg", "thumbs/abstract-aurora-1.jpg"},
+	{"abstract-aurora-2", "Nordlicht II", "Abstrakt", "abstract-aurora-2.jpg", "thumbs/abstract-aurora-2.jpg"},
+	{"abstract-obsidian-1", "Obsidian", "Abstrakt", "abstract-obsidian-1.jpg", "thumbs/abstract-obsidian-1.jpg"},
+	{"abstract-obsidian-2", "Obsidian II", "Abstrakt", "abstract-obsidian-2.jpg", "thumbs/abstract-obsidian-2.jpg"},
+	{"space-nebula-1", "Stiller Nebel", "Space", "space-nebula-1.jpg", "thumbs/space-nebula-1.jpg"},
+	{"space-nebula-2", "Stiller Nebel II", "Space", "space-nebula-2.jpg", "thumbs/space-nebula-2.jpg"},
+	{"space-orbit", "Sonnenaufgang aus dem Orbit", "Space", "space-orbit.jpg", "thumbs/space-orbit.jpg"},
 	{"nature-lake", "Bergsee", "Natur", "nature-lake.jpg", "thumbs/nature-lake.jpg"},
-	{"nature-autumn", "Herbstwald", "Natur", "nature-autumn.jpg", "thumbs/nature-autumn.jpg"},
-	{"nature-valley", "Grünes Tal", "Natur", "nature-valley.jpg", "thumbs/nature-valley.jpg"},
-	{"sea-reef", "Great Barrier Reef", "Meer", "sea-reef.jpg", "thumbs/sea-reef.jpg"},
-	{"sea-sunglint", "Ozean im Sonnenlicht", "Meer", "sea-sunglint.jpg", "thumbs/sea-sunglint.jpg"},
-	{"city-night", "Stadt bei Nacht", "Stadt", "city-night.jpg", "thumbs/city-night.jpg"},
+	{"nature-dusklake-1", "See in der Dämmerung", "Natur", "nature-dusklake-1.jpg", "thumbs/nature-dusklake-1.jpg"},
+	{"nature-dusklake-2", "See in der Dämmerung II", "Natur", "nature-dusklake-2.jpg", "thumbs/nature-dusklake-2.jpg"},
+	{"nature-ridges-1", "Nebelgrate", "Natur", "nature-ridges-1.jpg", "thumbs/nature-ridges-1.jpg"},
+	{"nature-ridges-2", "Nebelgrate II", "Natur", "nature-ridges-2.jpg", "thumbs/nature-ridges-2.jpg"},
+	{"code-circuit-1", "Platine", "Code", "code-circuit-1.jpg", "thumbs/code-circuit-1.jpg"},
+	{"code-circuit-2", "Platine II", "Code", "code-circuit-2.jpg", "thumbs/code-circuit-2.jpg"},
+	{"code-terminal-1", "Terminalregen", "Code", "code-terminal-1.jpg", "thumbs/code-terminal-1.jpg"},
+	{"code-terminal-2", "Terminalregen II", "Code", "code-terminal-2.jpg", "thumbs/code-terminal-2.jpg"},
 }
 
 // wallpaperCategories returns the distinct categories in first-seen (curated) order,
@@ -71,8 +73,32 @@ func wallpapersIn(category string) []wallpaper {
 	return out
 }
 
-// presetByFile finds a preset by its File field (empty struct + false when unknown).
+// retiredPresets maps a preset file that has been dropped from the set to its closest
+// surviving replacement. A project that still points at an old NASA/Commons preset
+// keeps a wallpaper instead of falling back to a bare colour; picking a new one
+// overwrites the stored reference anyway.
+var retiredPresets = map[string]string{
+	"space-carina.jpg":       "space-nebula-1.jpg",
+	"space-pillars.jpg":      "space-nebula-2.jpg",
+	"space-deepfield.jpg":    "space-nebula-1.jpg",
+	"science-earthnight.jpg": "space-orbit.jpg",
+	"science-aurora.jpg":     "abstract-aurora-1.jpg",
+	"nature-mountains.jpg":   "nature-ridges-1.jpg",
+	"nature-dunes.jpg":       "abstract-obsidian-1.jpg",
+	"nature-forest.jpg":      "nature-ridges-2.jpg",
+	"nature-autumn.jpg":      "nature-dusklake-1.jpg",
+	"nature-valley.jpg":      "nature-dusklake-2.jpg",
+	"sea-reef.jpg":           "nature-dusklake-1.jpg",
+	"sea-sunglint.jpg":       "space-orbit.jpg",
+	"city-night.jpg":         "code-circuit-1.jpg",
+}
+
+// presetByFile finds a preset by its File field (empty struct + false when unknown),
+// following retiredPresets so old references still resolve.
 func presetByFile(file string) (wallpaper, bool) {
+	if repl, ok := retiredPresets[file]; ok {
+		file = repl
+	}
 	for _, w := range wallpapers {
 		if w.File == file {
 			return w, true
@@ -84,10 +110,11 @@ func presetByFile(file string) (wallpaper, bool) {
 // presetURL maps a preset file to its same-origin static URL, or "" if the file is
 // not a known preset (guards against arbitrary paths reaching the CSS url()).
 func presetURL(file string) string {
-	if _, ok := presetByFile(file); !ok {
+	w, ok := presetByFile(file)
+	if !ok {
 		return ""
 	}
-	return "/web/wallpapers/" + file
+	return "/web/wallpapers/" + w.File // w.File, not file: retired names resolve here
 }
 
 // presetThumbURL maps a preset file to its thumbnail URL (falls back to the full-size

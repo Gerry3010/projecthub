@@ -3,6 +3,8 @@
 package webui
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -56,5 +58,36 @@ func TestPresetThumbURL(t *testing.T) {
 	}
 	if presetThumbURL("nope.jpg") != "" {
 		t.Error("unknown thumb must be empty")
+	}
+}
+
+// A project that still points at one of the retired NASA/Commons presets keeps a
+// wallpaper: the reference resolves to the replacement's file, never to the old name.
+func TestRetiredPresetsResolveToSurvivors(t *testing.T) {
+	if len(retiredPresets) == 0 {
+		t.Skip("nothing retired")
+	}
+	for old, repl := range retiredPresets {
+		if _, ok := presetByFile(repl); !ok {
+			t.Errorf("replacement %q for %q is not a bundled preset", repl, old)
+		}
+		if got := presetURL(old); got != "/web/wallpapers/"+repl {
+			t.Errorf("presetURL(%q) = %q, want the replacement %q", old, got, repl)
+		}
+		if got := presetThumbURL(old); !strings.Contains(got, repl) {
+			t.Errorf("presetThumbURL(%q) = %q, want the replacement's thumb", old, got)
+		}
+	}
+}
+
+// Every bundled preset must actually ship both files — a typo in the table would
+// otherwise only show up as a blank tile in the picker.
+func TestEveryPresetFileExists(t *testing.T) {
+	for _, w := range wallpapers {
+		for _, rel := range []string{w.File, w.Thumb} {
+			if _, err := os.Stat(filepath.Join("..", "..", "web", "wallpapers", rel)); err != nil {
+				t.Errorf("preset %q: %v", w.Key, err)
+			}
+		}
 	}
 }
