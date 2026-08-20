@@ -36,6 +36,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/coder/websocket"
@@ -58,6 +59,13 @@ const scrollbackCap = 256 << 10 // 256 KiB
 // output for this long — a safety net for windows/tiles closed without an explicit
 // Close (e.g. the whole window was closed).
 const idleReapAfter = 30 * time.Minute
+
+// gracePeriod is how long a session gets to shut itself down after we ask it to.
+// It matters most for Claude Code: on SIGHUP/SIGTERM it finishes writing its
+// transcript, on SIGKILL the tail of the conversation is simply gone. Four seconds
+// is well inside what the shutdown path affords — Electron does not wait for the
+// sidecar (an orphaned sidecar reaps itself via watchParent), so this budget is ours.
+const gracePeriod = 4 * time.Second
 
 // OpenRequest describes a PTY session to start.
 type OpenRequest struct {
@@ -310,15 +318,24 @@ func (h *Host) get(id string) (*session, bool) {
 	return s, ok
 }
 
-// Close terminates a session's process and frees its PTY (explicit kill: tile closed,
-// process exited, or idle-reaped).
+// Close ends a session (tile closed, process exited, or idle-reaped). The teardown
+// itself runs in the background because it gives the process time to save its work —
+// the caller is an HTTP handler and must not sit through it.
 func (h *Host) Close(id string) {
+	if s := h.take(id); s != nil {
+		go s.shutdown(gracePeriod)
+	}
+}
+
+// take removes a session from the host and detaches its subscriber, returning it to
+// exactly one caller — whoever gets it owns the teardown. nil if it is already gone.
+func (h *Host) take(id string) *session {
 	h.mu.Lock()
 	s, ok := h.sessions[id]
 	delete(h.sessions, id)
 	h.mu.Unlock()
 	if !ok {
-		return
+		return nil
 	}
 	s.doneOnce.Do(func() { close(s.done) })
 	s.mu.Lock()
@@ -327,15 +344,48 @@ func (h *Host) Close(id string) {
 		s.sub = nil
 	}
 	s.mu.Unlock()
-	s.close()
+	return s
 }
 
-func (s *session) close() {
-	_ = s.ptmx.Close()
-	if s.cmd.Process != nil {
-		_ = s.cmd.Process.Kill()
+// shutdown asks the session's process group to stop, waits out the grace period, and
+// only then kills it. The signal goes to the GROUP because the pane usually runs a
+// shell with the interesting process (claude) in front of it — signalling only the
+// shell would leave the child to be orphaned and hard-killed.
+//
+// The PTY master is closed last: closing it first hangs up the terminal underneath a
+// program that is still trying to write its final lines.
+func (s *session) shutdown(grace time.Duration) {
+	if s.cmd.Process == nil {
+		_ = s.ptmx.Close()
+		return
 	}
-	_ = s.cmd.Wait()
+	exited := make(chan struct{})
+	go func() { _ = s.cmd.Wait(); close(exited) }()
+
+	// SIGHUP first — for an interactive terminal program this is the ordinary "your
+	// terminal went away", which is exactly what happened, and Claude Code treats it
+	// as a clean exit. SIGTERM follows for anything that ignores a hangup.
+	signalProcess(s.cmd.Process, syscall.SIGHUP)
+	if !waitFor(exited, grace/2) {
+		signalProcess(s.cmd.Process, syscall.SIGTERM)
+		if !waitFor(exited, grace/2) {
+			signalProcess(s.cmd.Process, syscall.SIGKILL)
+			waitFor(exited, 2*time.Second)
+		}
+	}
+	_ = s.ptmx.Close()
+}
+
+// waitFor reports whether done closed within d.
+func waitFor(done <-chan struct{}, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-done:
+		return true
+	case <-t.C:
+		return false
+	}
 }
 
 // reapLoop collects long-detached idle sessions (window/tile closed without an explicit
@@ -362,16 +412,32 @@ func (h *Host) reapLoop() {
 	}
 }
 
-// CloseAll terminates every live session (used on sidecar shutdown).
+// CloseAll ends every live session and WAITS for them — this runs on sidecar
+// shutdown, and exiting early would leave the processes orphaned mid-save. The
+// sessions shut down concurrently, so the whole wait is one grace period, not one
+// per terminal.
 func (h *Host) CloseAll() {
 	h.mu.Lock()
 	sessions := h.sessions
 	h.sessions = make(map[string]*session)
 	h.mu.Unlock()
+
+	var wg sync.WaitGroup
 	for _, s := range sessions {
 		s.doneOnce.Do(func() { close(s.done) })
-		s.close()
+		s.mu.Lock()
+		if s.sub != nil {
+			s.sub.kill()
+			s.sub = nil
+		}
+		s.mu.Unlock()
+		wg.Add(1)
+		go func(s *session) {
+			defer wg.Done()
+			s.shutdown(gracePeriod)
+		}(s)
 	}
+	wg.Wait()
 }
 
 // ServeWS upgrades the request to a WebSocket and attaches it to the PTY session: it

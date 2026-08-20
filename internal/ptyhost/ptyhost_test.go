@@ -4,8 +4,11 @@ package ptyhost
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -135,5 +138,90 @@ func TestReattachReplaysScrollbackAndSurvivesDetach(t *testing.T) {
 	h.Close(id)
 	if h.Has(id) {
 		t.Fatalf("session still present after Close")
+	}
+}
+
+// TestCloseLetsTheProcessSaveItsWork is the graceful-shutdown contract: closing a
+// tile must give whatever runs in it a chance to finish writing. The stand-in for
+// Claude Code's transcript here is a file the shell writes from its HUP trap — a
+// SIGKILL teardown never produces it.
+func TestCloseLetsTheProcessSaveItsWork(t *testing.T) {
+	dir := t.TempDir()
+	saved := filepath.Join(dir, "transcript")
+	h := New(2)
+	id, err := h.Open(OpenRequest{
+		Cmd:  "/bin/sh",
+		Args: []string{"-c", `trap 'printf saved > "$0"; exit 0' HUP; while :; do sleep 0.05; done`, saved},
+		Cols: 80, Rows: 24,
+	})
+	if err != nil {
+		t.Fatalf("open pty: %v", err)
+	}
+	// Let the shell install its trap before we pull the rug out.
+	time.Sleep(400 * time.Millisecond)
+
+	h.Close(id)
+	if h.Has(id) {
+		t.Error("Close must drop the session from the host immediately")
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if b, err := os.ReadFile(saved); err == nil && string(b) == "saved" {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("the process never got to write its file — teardown was not graceful")
+}
+
+// TestCloseAllWaitsForEverySession: on sidecar shutdown we must not exit while the
+// terminals are still saving, or they end up orphaned mid-write.
+func TestCloseAllWaitsForEverySession(t *testing.T) {
+	dir := t.TempDir()
+	h := New(4)
+	var files []string
+	for i := range 2 {
+		f := filepath.Join(dir, fmt.Sprintf("t%d", i))
+		files = append(files, f)
+		if _, err := h.Open(OpenRequest{
+			Cmd:  "/bin/sh",
+			Args: []string{"-c", `trap 'printf saved > "$0"; exit 0' HUP; while :; do sleep 0.05; done`, f},
+			Cols: 80, Rows: 24,
+		}); err != nil {
+			t.Fatalf("open pty %d: %v", i, err)
+		}
+	}
+	time.Sleep(400 * time.Millisecond)
+
+	h.CloseAll()
+	for _, f := range files {
+		b, err := os.ReadFile(f)
+		if err != nil || string(b) != "saved" {
+			t.Fatalf("%s not written when CloseAll returned (%v)", filepath.Base(f), err)
+		}
+	}
+}
+
+// TestShutdownKillsWhatIgnoresTheSignals — the grace period is a courtesy, not a
+// hostage situation.
+func TestShutdownKillsWhatIgnoresTheSignals(t *testing.T) {
+	h := New(2)
+	id, err := h.Open(OpenRequest{
+		Cmd:  "/bin/sh",
+		Args: []string{"-c", `trap '' HUP TERM; while :; do sleep 0.05; done`},
+		Cols: 80, Rows: 24,
+	})
+	if err != nil {
+		t.Fatalf("open pty: %v", err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	s := h.take(id)
+	if s == nil {
+		t.Fatal("session vanished before the test could take it")
+	}
+	start := time.Now()
+	s.shutdown(600 * time.Millisecond)
+	if d := time.Since(start); d > 3*time.Second {
+		t.Fatalf("shutdown took %v — the kill fallback did not fire", d)
 	}
 }

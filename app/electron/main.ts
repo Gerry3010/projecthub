@@ -794,15 +794,23 @@ app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
 
-/** Kill the sidecar cleanly on quit: SIGTERM, then SIGKILL after a grace period. */
+/** Stop the sidecar cleanly on quit: SIGTERM, then SIGKILL if it is still there.
+ *  The sidecar uses that window to hang up its terminals gracefully — Claude Code
+ *  finishes writing its transcript on the way out — so the grace period has to be
+ *  longer than its own (ptyhost.gracePeriod). `killed` only records that a signal was
+ *  SENT, so the fallback checks whether the process actually ended. */
 app.on("before-quit", (e) => {
   quitting = true;
   if (child) {
     const proc = child;
+    let gone = false;
+    proc.once("exit", () => {
+      gone = true;
+    });
     proc.kill("SIGTERM");
     setTimeout(() => {
-      if (!proc.killed) proc.kill("SIGKILL");
-    }, 2000);
+      if (!gone) proc.kill("SIGKILL");
+    }, 8000);
   }
   // Stop the local backend WE started before the process exits. Defer the quit until
   // `docker compose stop` returns; the `stopping` guard lets the re-quit pass straight
