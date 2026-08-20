@@ -235,6 +235,44 @@ async function main() {
     );
   }
 
+  // ── 6. the panels stay inside the window and scroll ──────────────────────
+  if (await page.locator(".ph-backdrop").count()) await page.locator(".ph-backdrop").first().click();
+  for (const [title, sel] of [
+    ["Aussehen / Hintergrund", ".ph-appr:not(.ph-layout-panel)"],
+    ["Layout", ".ph-layout-panel"],
+  ]) {
+    await page.waitForFunction(() => document.querySelectorAll(".ph-backdrop").length === 0, null, {
+      timeout: 5000,
+    });
+    await page.locator(`.ph-ws-toolbar button[title="${title}"]`).click();
+    await page.waitForSelector(sel, { timeout: 5000 });
+    const box = await page.evaluate((s) => {
+      const el = document.querySelector(s);
+      const r = el.getBoundingClientRect();
+      el.scrollTop = el.scrollHeight; // ask for the very bottom
+      const head = el.querySelector(".ph-appr-head").getBoundingClientRect();
+      return {
+        bottom: r.bottom,
+        view: window.innerHeight,
+        overflows: el.scrollHeight > el.clientHeight + 1,
+        scrolled: el.scrollTop,
+        headTop: head.top,
+        panelTop: r.top,
+      };
+    }, sel);
+    check(box.bottom <= box.view - 1, `${title}: the panel ends inside the window (${Math.round(box.bottom)} ≤ ${box.view})`);
+    if (box.overflows) {
+      check(box.scrolled > 0, `${title}: the panel scrolls when it runs out of room (${Math.round(box.scrolled)}px)`);
+      check(
+        Math.abs(box.headTop - box.panelTop) < 3,
+        `${title}: the title sticks to the top while scrolling (${Math.round(box.headTop - box.panelTop)}px off)`,
+      );
+    } else {
+      log("skip", `${title}: fits without scrolling in this window`);
+    }
+    await page.locator(`${sel} .ph-appr-head button`).click();
+  }
+
   await app.close();
   console.log(fails.length ? `\n${fails.length} FAILED:\n- ${fails.join("\n- ")}` : "\nall checks passed");
   process.exit(fails.length ? 1 : 0);
