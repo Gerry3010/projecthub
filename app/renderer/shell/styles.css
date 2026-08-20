@@ -569,3 +569,67 @@ body.ph-resizing { cursor: grabbing; user-select: none; }
 }
 .ph-md pre code { background: none; padding: 0; }
 .ph-md-err { color: var(--err); }
+
+/* ── layout: snap guides, plan diagrams, layout manager ──────────────────────
+   One picture vocabulary: a rounded outline is the workspace, filled cells are
+   panes. The same shape appears as a snap guide while dragging, as a fraction chip
+   in a tile's ⋯ menu, and as an arrangement in the layout manager. */
+.ph-split { position: relative; }
+.ph-snapguides { position: absolute; inset: 0; pointer-events: none; z-index: 5; }
+.ph-snapguide {
+  position: absolute; display: block;
+  background: color-mix(in srgb, var(--accent) 36%, transparent);
+}
+.ph-snapguides > .ph-snapguide { top: 0; bottom: 0; width: 1px; margin-left: -0.5px; }
+.ph-split[data-dir="col"] > .ph-snapguides > .ph-snapguide {
+  top: auto; bottom: auto; left: 0; right: 0; width: auto; height: 1px; margin: -0.5px 0 0;
+}
+.ph-snapguide.is-active { background: var(--accent); width: 2px; margin-left: -1px; }
+.ph-split[data-dir="col"] > .ph-snapguides > .ph-snapguide.is-active {
+  width: auto; height: 2px; margin: -1px 0 0;
+}
+
+.ph-diag { display: block; overflow: visible; }
+.ph-diag-frame { fill: none; stroke: var(--ph-line); stroke-width: 1; }
+.ph-diag-cell { fill: color-mix(in srgb, var(--ph-ink) 15%, transparent); }
+
+/* fraction chips in the tile ⋯ menu */
+.ph-menu-row { display: flex; align-items: center; gap: 0.5rem; padding: 0.4rem 0.6rem 0.2rem; }
+.ph-menu-row-label { font-size: 0.78rem; color: var(--ph-ink-3); }
+.ph-frac { display: flex; gap: 0.1rem; margin-left: auto; }
+.ph-frac-btn {
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  background: none; border: 1px solid transparent; border-radius: 6px;
+  padding: 3px 4px; cursor: pointer; color: var(--ph-ink-3); font: inherit;
+}
+.ph-frac-label { font-size: 0.62rem; font-family: var(--font-mono); line-height: 1; }
+.ph-frac-btn:hover { border-color: color-mix(in srgb, var(--accent) 55%, transparent); color: var(--ph-ink); }
+.ph-frac-btn.is-current { border-color: var(--accent); color: var(--accent); }
+.ph-frac-btn:hover .ph-diag-cell, .ph-frac-btn.is-current .ph-diag-cell {
+  fill: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+/* layout manager popover */
+.ph-layout-panel .ph-eyebrow { margin: 0.4rem 0 0.05rem; }
+.ph-tpl-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.35rem; }
+.ph-tpl {
+  display: flex; flex-direction: column; align-items: center; gap: 0.3rem;
+  background: none; border: 1px solid transparent; border-radius: 8px;
+  padding: 0.45rem 0.2rem; cursor: pointer; color: var(--ph-ink-3);
+  font: inherit; font-size: 0.65rem; line-height: 1.15; text-align: center;
+}
+.ph-tpl:hover { border-color: var(--accent); color: var(--ph-ink); background: var(--ph-panel); }
+.ph-tpl:hover .ph-diag-cell { fill: color-mix(in srgb, var(--accent) 45%, transparent); }
+.ph-tpl.is-dim .ph-diag { opacity: 0.45; }
+.ph-layout-acts { display: flex; gap: 0.4rem; margin-top: 0.2rem; }
+.ph-layout-save { display: flex; gap: 0.4rem; align-items: center; }
+.ph-layout-save input { flex: 1; min-width: 0; }
+.ph-preset-list { display: flex; flex-direction: column; gap: 0.1rem; max-height: 9rem; overflow: auto; }
+.ph-preset { display: flex; align-items: center; gap: 0.25rem; }
+.ph-preset-apply {
+  flex: 1; min-width: 0; text-align: left; background: none; border: 0;
+  color: var(--ph-ink); font: inherit; font-size: 0.85rem;
+  padding: 0.35rem 0.5rem; border-radius: var(--radius-sm); cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ph-preset-apply:hover { background: var(--ph-panel); }

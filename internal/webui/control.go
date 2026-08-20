@@ -134,10 +134,37 @@ func (w *Workspace) runControlTool(ctx app.Context, tool string, args json.RawMe
 			return nil, err
 		}
 		return map[string]bool{"ok": true}, nil
-	case "tile_list", "tile_create", "tile_close", "tile_focus":
+	case "layout_get", "tile_list", "tile_create", "tile_close", "tile_focus":
 		return w.execTileControlSync(ctx, tool, args)
 	}
 	return nil, fmt.Errorf("unknown tool %q", tool)
+}
+
+// layoutNodeJSON renders the tiling tree for the layout_get tool. It mirrors the
+// stored shape but spells out the effective ratio (0 means "an even split" on disk),
+// so a reader does not have to know that convention.
+func layoutNodeJSON(n *domain.LayoutNode) map[string]any {
+	if n == nil {
+		return nil
+	}
+	if n.IsLeaf() {
+		out := map[string]any{"pane_id": n.PaneID, "type": string(n.Type)}
+		if len(n.Params) > 0 {
+			out["params"] = n.Params
+		}
+		return out
+	}
+	ratio := n.Ratio
+	if ratio == 0 {
+		ratio = 0.5
+	}
+	return map[string]any{
+		"node_id": n.PaneID,
+		"dir":     n.Dir,
+		"ratio":   ratio,
+		"a":       layoutNodeJSON(n.A),
+		"b":       layoutNodeJSON(n.B),
+	}
 }
 
 // execTileControlSync runs a tile tool on the UI goroutine (it mutates the layout /
@@ -163,6 +190,12 @@ func (w *Workspace) execTileControlSync(ctx app.Context, tool string, args json.
 // execTileControl runs on the UI goroutine.
 func (w *Workspace) execTileControl(tool string, args json.RawMessage) (any, error) {
 	switch tool {
+	case "layout_get":
+		return map[string]any{
+			"project": w.Ref.Title,
+			"root":    layoutNodeJSON(w.layout.Root),
+			"presets": presetNames(w.layout.Presets),
+		}, nil
 	case "tile_list":
 		out := []map[string]string{}
 		for _, leaf := range leaves(w.layout.Root) {

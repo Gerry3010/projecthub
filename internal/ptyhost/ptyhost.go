@@ -33,6 +33,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -81,6 +82,12 @@ func (sub *subscriber) kill() { sub.once.Do(func() { close(sub.dead) }) }
 type session struct {
 	ptmx *os.File
 	cmd  *exec.Cmd
+
+	// what this session is running — kept for diagnostics (Host.List → app_info),
+	// never for control flow.
+	cwd     string
+	cmdline string
+	started time.Time
 
 	mu       sync.Mutex
 	ring     []byte      // bounded scrollback (last scrollbackCap bytes)
@@ -187,12 +194,73 @@ func (h *Host) Open(req OpenRequest) (string, error) {
 	}
 
 	id := uuid.NewString()
-	s := &session{ptmx: ptmx, cmd: cmd, lastAct: time.Now(), done: make(chan struct{})}
+	s := &session{
+		ptmx: ptmx, cmd: cmd,
+		cwd:     req.Cwd,
+		cmdline: cmdline(req),
+		started: time.Now(),
+		lastAct: time.Now(),
+		done:    make(chan struct{}),
+	}
 	h.mu.Lock()
 	h.sessions[id] = s
 	h.mu.Unlock()
 	go h.pump(id, s)
 	return id, nil
+}
+
+// cmdline renders a session's command for diagnostics, bounded so a long argument
+// (a Claude prompt, an --mcp-config blob) cannot bloat a status response.
+func cmdline(req OpenRequest) string {
+	line := strings.TrimSpace(req.Cmd + " " + strings.Join(req.Args, " "))
+	if len(line) > 160 {
+		line = line[:157] + "…"
+	}
+	return line
+}
+
+// SessionInfo describes one live PTY session. It is the shape app_info reports, so
+// it carries only what helps answer "what is still running in there?".
+type SessionInfo struct {
+	ID       string `json:"id"`
+	Cmd      string `json:"cmd,omitempty"`
+	Cwd      string `json:"cwd,omitempty"`
+	PID      int    `json:"pid,omitempty"`
+	Attached bool   `json:"attached"` // false ⇒ running detached (no terminal on screen)
+	UptimeS  int64  `json:"uptime_s"`
+	IdleS    int64  `json:"idle_s"` // seconds since the last output/attach
+}
+
+// List snapshots the live sessions, sorted by id so callers get a stable order.
+func (h *Host) List() []SessionInfo {
+	h.mu.Lock()
+	ids := make([]string, 0, len(h.sessions))
+	snap := make(map[string]*session, len(h.sessions))
+	for id, s := range h.sessions {
+		ids = append(ids, id)
+		snap[id] = s
+	}
+	h.mu.Unlock()
+	sort.Strings(ids)
+
+	now := time.Now()
+	out := make([]SessionInfo, 0, len(ids))
+	for _, id := range ids {
+		s := snap[id]
+		s.mu.Lock()
+		info := SessionInfo{
+			ID: id, Cmd: s.cmdline, Cwd: s.cwd,
+			Attached: s.sub != nil,
+			UptimeS:  int64(now.Sub(s.started).Seconds()),
+			IdleS:    int64(now.Sub(s.lastAct).Seconds()),
+		}
+		s.mu.Unlock()
+		if s.cmd != nil && s.cmd.Process != nil {
+			info.PID = s.cmd.Process.Pid
+		}
+		out = append(out, info)
+	}
+	return out
 }
 
 // pump is the single reader of the PTY: it drains output into the scrollback ring and

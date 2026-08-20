@@ -27,6 +27,10 @@ type TileAction struct {
 	Label   string           // tooltip (bar) and text (overflow menu)
 	OnClick app.EventHandler // invoked on click
 	Danger  bool             // destructive styling in the overflow menu
+	// Custom replaces the icon+label row in the overflow menu with a whole rendered
+	// row — for a set of choices that belongs on ONE line (the size fractions) rather
+	// than as five near-identical menu entries. Ignored in the tile bar.
+	Custom app.UI
 }
 
 // glyph renders a TileAction's icon: the SVG line icon when set, else the fallback

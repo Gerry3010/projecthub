@@ -314,7 +314,10 @@ function createWindow(projectId: string): BrowserWindow {
     for (const [id, other] of windows) {
       if (other === w) windows.delete(id);
     }
+    reportAppInfoSoon();
   });
+  w.on("page-title-updated", reportAppInfoSoon);
+  reportAppInfoSoon();
   // Surface renderer console + errors to the main-process stdout for debugging.
   w.webContents.on("console-message", (_e, _lvl, message) => console.log("[renderer]", message));
   w.webContents.on("render-process-gone", (_e, d) => console.error("[renderer gone]", d.reason));
@@ -327,6 +330,59 @@ function createWindow(projectId: string): BrowserWindow {
   });
   w.loadURL(projectId ? `${base}#/p/${encodeURIComponent(projectId)}` : base);
   return w;
+}
+
+// ─── self-report to the sidecar ─────────────────────────────────────────────
+// Only this process knows the Electron/Chrome versions, whether it runs packaged,
+// where the bundle lives, and which windows are open. The sidecar caches the last
+// report and hands it to the app_info MCP tool, which is how "did my update actually
+// reach the running app?" becomes answerable from the outside.
+let appReportTimer: NodeJS.Timeout | null = null;
+
+function postAppInfo(): void {
+  if (!handshake) return;
+  const hs = handshake;
+  const body = JSON.stringify({
+    electron: process.versions.electron,
+    chrome: process.versions.chrome,
+    node: process.versions.node,
+    packaged: app.isPackaged,
+    app_version: app.getVersion(),
+    appimage: process.env.APPIMAGE || "",
+    exec_path: process.execPath,
+    resources_path: process.resourcesPath,
+    user_data: app.getPath("userData"),
+    pid: process.pid,
+    windows: [...windows.entries()]
+      .filter(([, w]) => !w.isDestroyed())
+      .map(([id, w]) => ({ project_id: id, title: w.getTitle(), focused: w.isFocused() })),
+  });
+  const req = http.request(
+    {
+      host: "127.0.0.1",
+      port: hs.port,
+      path: "/native/app",
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(body),
+        Authorization: `Bearer ${hs.token}`,
+      },
+    },
+    (res) => res.resume(),
+  );
+  req.setTimeout(2000, () => req.destroy());
+  req.on("error", () => {}); // best effort: a missed report only dims a status readout
+  req.end(body);
+}
+
+/** Coalesce the bursts (a window opens, is titled, gets focus) into one report. */
+function reportAppInfoSoon(): void {
+  if (appReportTimer) clearTimeout(appReportTimer);
+  appReportTimer = setTimeout(() => {
+    appReportTimer = null;
+    postAppInfo();
+  }, 300);
 }
 
 /** Focus the project's window if it exists, else create it. */
@@ -358,6 +414,7 @@ function rekeyWindow(w: BrowserWindow, projectId: string): void {
     if (other === w) windows.delete(id);
   }
   windows.set(projectId, w);
+  reportAppInfoSoon();
 }
 
 /** Called on sidecar (re)start. On first start opens the home window; on a restart the

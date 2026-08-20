@@ -35,6 +35,7 @@ var iconPaths = map[string]string{
 	"folder-open": `<path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.55 6a2 2 0 0 1-1.94 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.93a2 2 0 0 1 1.66.9l.82 1.2a2 2 0 0 0 1.66.9H18a2 2 0 0 1 2 2v2"/>`,
 	"lock":        `<rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>`,
 	"tasks":       `<path d="M11 12H3"/><path d="M16 6H3"/><path d="M16 18H3"/><path d="m17 9 2 2 4-4"/>`,
+	"layout":      `<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M14 3v18"/><path d="M14 12h7"/>`,
 	"play":        `<path d="M5 4.5 19 12 5 19.5z" fill="currentColor" stroke="none"/>`,
 }
 

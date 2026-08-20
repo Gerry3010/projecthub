@@ -66,6 +66,10 @@ type Workspace struct {
 	wctx    app.Context   // captured in OnMount; drives cold-path re-renders from child tiles
 	ctlStop chan struct{} // stops the MCP control long-poll loop
 
+	// layout manager (toolbar popover: arrangements, balance, saved layouts)
+	layoutOpen bool
+	presetName string
+
 	// appearance / background (the editing UI lives in the shared bgEditor component)
 	accountBg *domain.Background
 	apprOpen  bool
@@ -89,6 +93,15 @@ func (w *Workspace) OnMount(ctx app.Context) {
 		}
 		return nil
 	}))
+	// Hand the divider drag its snap table: the gesture lives in JS, the fractions
+	// live in Go (SnapPoints) so the tile menu and the drag agree by construction.
+	if sh := app.Window().Get("phShell"); sh.Truthy() {
+		pts := make([]any, len(SnapPoints))
+		for i, p := range SnapPoints {
+			pts[i] = p
+		}
+		sh.Call("setSnapPoints", pts)
+	}
 	// Persist the browser tile's tab state (JS island owns the live chrome; this is
 	// the cold-path callback for layout-restore + tile-label refresh). Args:
 	// paneID, tabsJSON ([{url,title}]), activeIdx. Dispatch onto the render loop so
@@ -262,6 +275,12 @@ func (w *Workspace) Render() app.UI {
 				w.appearancePanel(),
 			)
 		}),
+		app.If(w.layoutOpen, func() app.UI {
+			return app.Div().Body(
+				app.Div().Class("ph-backdrop").OnClick(func(ctx app.Context, _ app.Event) { w.layoutOpen = false }),
+				w.layoutPanel(),
+			)
+		}),
 		app.If(w.menuPane != "", w.tileMenuPopover),
 	)
 }
@@ -283,6 +302,9 @@ func (w *Workspace) tileMenuPopover() app.UI {
 			Body(
 				app.Range(items).Slice(func(i int) app.UI {
 					a := items[i]
+					if a.Custom != nil {
+						return a.Custom
+					}
 					cls := "ph-menu-item"
 					if a.Danger {
 						cls += " ph-menu-item-danger"
@@ -317,8 +339,17 @@ func (w *Workspace) toolbar() app.UI {
 		app.Div().Class("ph-spacer"),
 		app.If(w.status != "", func() app.UI { return app.Span().Class("ph-muted").Text(w.status) }),
 		&accentPicker{Current: w.Ref.AccentColor(), OnPick: w.pickColor, OnCustom: w.customColor},
+		app.Button().Class("ph-tile-btn ph-tile-btn-lg").Title("Layout").
+			OnClick(func(ctx app.Context, _ app.Event) {
+				w.layoutOpen = !w.layoutOpen
+				w.apprOpen = false
+			}).
+			Body(icon("layout", 17)),
 		app.Button().Class("ph-tile-btn ph-tile-btn-lg").Title("Aussehen / Hintergrund").
-			OnClick(func(ctx app.Context, _ app.Event) { w.apprOpen = !w.apprOpen }).
+			OnClick(func(ctx app.Context, _ app.Event) {
+				w.apprOpen = !w.apprOpen
+				w.layoutOpen = false
+			}).
 			Body(icon("sliders", 17)),
 		app.Div().Class("ph-add").Body(
 			app.Button().Class("ph-btn").Text("+ Tile").OnClick(func(ctx app.Context, _ app.Event) {
@@ -496,13 +527,79 @@ func (w *Workspace) tileActions(n *domain.LayoutNode) []TileAction {
 	return nil
 }
 
-// tileMenu is the ⋯ overflow content: the universal split actions plus any
-// type-specific secondary actions.
+// tileMenu is the ⋯ overflow content: the universal split actions, the size
+// fractions (when the tile sits in a split), plus any type-specific secondary actions.
 func (w *Workspace) tileMenu(n *domain.LayoutNode) []TileAction {
 	paneID := n.PaneID
-	return []TileAction{
+	items := []TileAction{
 		{Icon: "⇆", Label: "Horizontal teilen", OnClick: func(ctx app.Context, _ app.Event) { w.splitTile(paneID, "row") }},
 		{Icon: "⇅", Label: "Vertikal teilen", OnClick: func(ctx app.Context, _ app.Event) { w.splitTile(paneID, "col") }},
+	}
+	if row := w.sizeRow(paneID); row != nil {
+		items = append(items, TileAction{Custom: row})
+	}
+	return items
+}
+
+// sizeRow is the fraction picker for one tile: how much of its split it takes. nil
+// when the tile is the whole workspace — there is no neighbour to give space to.
+func (w *Workspace) sizeRow(paneID string) app.UI {
+	sp, side := findSplitOfLeaf(w.layout.Root, paneID)
+	if sp == nil {
+		return nil
+	}
+	label := "Breite"
+	if sp.Dir == "col" {
+		label = "Höhe"
+	}
+	current := sp.Ratio
+	if current == 0 {
+		current = 0.5
+	}
+	if side == "b" {
+		current = 1 - current
+	}
+	nodeID := sp.PaneID
+	return app.Div().Class("ph-menu-row").Body(
+		app.Span().Class("ph-menu-row-label").Text(label),
+		app.Div().Class("ph-frac").Body(
+			app.Range(SnapPoints).Slice(func(i int) app.UI {
+				frac := SnapPoints[i]
+				cls := "ph-frac-btn"
+				if nearRatio(current, frac) {
+					cls += " is-current"
+				}
+				return app.Button().Class(cls).Title(snapLabels[i]).
+					OnClick(func(ctx app.Context, _ app.Event) {
+						w.menuPane = ""
+						w.applyRatio(nodeID, frac, side)
+					}).
+					Body(fracGlyph(frac, sp.Dir), app.Span().Class("ph-frac-label").Text(snapLabels[i]))
+			}),
+		),
+	)
+}
+
+// nearRatio reports whether two fractions are the same for display purposes (⅓ is
+// stored as 0.3333…, and a drag lands a hair off).
+func nearRatio(a, b float64) bool { return a-b < 0.005 && b-a < 0.005 }
+
+// applyRatio sets a split's ratio so that the tile on the given side gets frac. It
+// writes the CSS variable directly first because go-app does not reliably re-apply an
+// inline custom property on re-render (same reason as applyColor).
+func (w *Workspace) applyRatio(nodeID string, frac float64, side string) {
+	r := frac
+	if side == "b" {
+		r = 1 - frac
+	}
+	setSplitRatioJS(nodeID, r)
+	w.setRatio(nodeID, r)
+}
+
+// setSplitRatioJS moves a divider in the DOM without a re-render.
+func setSplitRatioJS(nodeID string, r float64) {
+	if sh := app.Window().Get("phShell"); sh.Truthy() {
+		sh.Call("setSplitRatio", nodeID, r)
 	}
 }
 

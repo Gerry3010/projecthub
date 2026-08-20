@@ -35,6 +35,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -64,6 +65,14 @@ type Server struct {
 	getServer func() string
 	setServer func(string) error
 
+	// started/port/webDir/appReport back the app_info MCP tool: what this build is,
+	// where it listens, and what the Electron shell last told us about itself.
+	started   time.Time
+	mu        sync.Mutex
+	port      int
+	webDir    string
+	appReport json.RawMessage
+
 	// notify is the desktop/in-app notification queue: POST /notify enqueues, the
 	// renderer drains it via the /notify/next long-poll. Buffered + drop-oldest so a
 	// producer (e.g. the chattr bridge) never blocks.
@@ -80,7 +89,11 @@ type notifyMsg struct {
 // New returns a native API server authenticated by token, using pty for terminals
 // and tabs for the live browser-tab state (fed by the native-messaging host).
 func New(token string, pty *ptyhost.Host, tabs *tabstate.Store) *Server {
-	return &Server{token: token, pty: pty, tabs: tabs, hub: control.New(), notify: make(chan notifyMsg, 64)}
+	return &Server{
+		token: token, pty: pty, tabs: tabs, hub: control.New(),
+		started: time.Now(),
+		notify:  make(chan notifyMsg, 64),
+	}
 }
 
 // SetServerHooks wires the /server endpoint to the live Passbubble upstream: get
@@ -122,6 +135,7 @@ func (s *Server) Handler() http.Handler {
 	r.Get("/pipepush/pipelines", s.pipepushPipelines)
 	r.Get("/pipepush/runs", s.pipepushRuns)
 	r.Get("/redmine/issues", s.redmineIssues)
+	r.Post("/app", s.appRegister)
 	r.Post("/notify", s.notifyPost)
 	r.Get("/notify/next", s.notifyNext)
 	// MCP: cmd/phmcp bridges Claude Code's MCP calls to these; renderer tools are

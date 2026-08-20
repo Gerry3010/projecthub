@@ -45,6 +45,12 @@ func Tools() []Tool {
 			Renderer:    true,
 		},
 		{
+			Name:        "layout_get",
+			Description: "Return the active project's tiling layout as a tree: splits with direction and ratio, leaves with pane id, tile type and params. Use this (rather than tile_list) when the arrangement itself matters.",
+			InputSchema: obj(`{"type":"object","properties":{},"additionalProperties":false}`),
+			Renderer:    true,
+		},
+		{
 			Name:        "tile_list",
 			Description: "List the tiles currently open in the active project's workspace (pane id, type).",
 			InputSchema: obj(`{"type":"object","properties":{},"additionalProperties":false}`),
@@ -82,6 +88,11 @@ func Tools() []Tool {
 		},
 
 		// ── local tools (sidecar, no vault) ──
+		{
+			Name:        "app_info",
+			Description: "Report which ProjectHub build is running and what it is doing: version/commit/dirty flag of the sidecar, the MCP bridge and the shipped web/app.wasm; the Electron shell's versions, bundle path and open windows; live PTY sessions; and the config/discovery paths. Compare build.phd.commit with the repo's HEAD to tell whether an update actually reached the running app.",
+			InputSchema: obj(`{"type":"object","properties":{},"additionalProperties":false}`),
+		},
 		{
 			Name:        "session_list",
 			Description: "List the Claude Code sessions recorded on disk for a working directory.",

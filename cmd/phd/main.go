@@ -123,6 +123,10 @@ func main() {
 	ptys := ptyhost.New(32)
 	tabs := tabstate.New()
 	native := nativeserver.New(token, ptys, tabs)
+	// Where we listen and which asset directory we serve — the app_info MCP tool
+	// reports both, and only this process knows them (the port is random per launch,
+	// and the web dir is relative to the cwd Electron started us in).
+	native.SetRuntimeInfo(port, absWebDir())
 
 	// The Passbubble upstream is runtime-swappable and device-local: a persisted
 	// override (set in the login screen's Server field) wins over PASSBUBBLE_URL, so
@@ -236,6 +240,16 @@ func env(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// absWebDir resolves the frontend asset directory the sidecar serves (relative to
+// its working directory: the repo root in dev, the bundle's resources in prod).
+func absWebDir() string {
+	dir := env("WEB_DIR", "web")
+	if abs, err := filepath.Abs(dir); err == nil {
+		return abs
+	}
+	return dir
 }
 
 // serverURLPath is where the device-local Passbubble upstream override lives, next to

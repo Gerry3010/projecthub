@@ -1459,15 +1459,71 @@ function normalizeURL(u: string): string {
 
 // ─── divider resize ─────────────────────────────────────────────────────────────
 
+// The fractions a divider snaps to. Go owns the list (webui.SnapPoints) and hands it
+// over on mount via setSnapPoints; this default only covers the moment before that.
+let snapPoints: number[] = [0.25, 1 / 3, 0.5, 2 / 3, 0.75];
+
+// snapThreshold: how far from a snap point the divider still gets pulled in. It is a
+// fraction of the split, capped in pixels so a very wide split doesn't snap across
+// half a centimetre of travel.
+function snapThreshold(extent: number): number {
+  return Math.min(0.03, 24 / Math.max(extent, 1));
+}
+
+// snapRatio pulls r onto the nearest snap point within thresh (mirrors webui.snapRatio).
+function snapRatio(r: number, thresh: number): number {
+  let best = r;
+  let bestDist = thresh;
+  for (const p of snapPoints) {
+    const d = Math.abs(p - r);
+    if (d <= bestDist) {
+      best = p;
+      bestDist = d;
+    }
+  }
+  return best;
+}
+
+// showGuides draws one hairline per snap point inside the split being dragged, so the
+// magnet is visible instead of merely felt. Removed again when the drag ends.
+function showGuides(split: HTMLElement, dir: string): HTMLElement {
+  const box = document.createElement("div");
+  box.className = "ph-snapguides";
+  for (const p of snapPoints) {
+    const line = document.createElement("i");
+    line.className = "ph-snapguide";
+    line.dataset.p = String(p);
+    if (dir === "col") line.style.top = p * 100 + "%";
+    else line.style.left = p * 100 + "%";
+    box.appendChild(line);
+  }
+  split.appendChild(box);
+  return box;
+}
+
+function markGuide(box: HTMLElement | null, snapped: number | null): void {
+  if (!box) return;
+  for (const line of Array.from(box.children) as HTMLElement[]) {
+    const hit = snapped !== null && Math.abs(Number(line.dataset.p) - snapped) < 1e-6;
+    line.classList.toggle("is-active", hit);
+  }
+}
+
 function initDividerResize(): void {
-  let active: { split: HTMLElement; dir: string; node: string } | null = null;
+  let active: {
+    split: HTMLElement;
+    dir: string;
+    node: string;
+    guides: HTMLElement | null;
+  } | null = null;
 
   document.addEventListener("pointerdown", (e) => {
     const div = (e.target as HTMLElement)?.closest?.(".ph-divider") as HTMLElement | null;
     if (!div) return;
     const split = div.parentElement as HTMLElement;
     if (!split?.classList.contains("ph-split")) return;
-    active = { split, dir: split.dataset.dir || "row", node: div.dataset.node || "" };
+    const dir = split.dataset.dir || "row";
+    active = { split, dir, node: div.dataset.node || "", guides: showGuides(split, dir) };
     div.setPointerCapture(e.pointerId);
     document.body.classList.add("ph-resizing");
     e.preventDefault();
@@ -1476,24 +1532,42 @@ function initDividerResize(): void {
   document.addEventListener("pointermove", (e) => {
     if (!active) return;
     const rect = active.split.getBoundingClientRect();
-    let r =
-      active.dir === "col"
-        ? (e.clientY - rect.top) / rect.height
-        : (e.clientX - rect.left) / rect.width;
+    const vertical = active.dir === "col";
+    const extent = vertical ? rect.height : rect.width;
+    let r = (vertical ? e.clientY - rect.top : e.clientX - rect.left) / extent;
     r = Math.max(0.05, Math.min(0.95, r));
-    active.split.style.setProperty("--r", String(r));
-    (active.split as any)._r = r;
+    // Alt turns the magnet off for the rest of the gesture — the escape hatch for a
+    // proportion the snap table doesn't have.
+    const snapped = e.altKey ? r : snapRatio(r, snapThreshold(extent));
+    markGuide(active.guides, snapped === r ? null : snapped);
+    active.split.style.setProperty("--r", String(snapped));
+    (active.split as any)._r = snapped;
   });
 
   const end = () => {
     if (!active) return;
     const r = (active.split as any)._r;
     if (typeof r === "number") (window as any).phWsRatio?.(active.node, r);
+    active.guides?.remove();
     document.body.classList.remove("ph-resizing");
     active = null;
   };
   document.addEventListener("pointerup", end);
   document.addEventListener("pointercancel", end);
+}
+
+/** setSnapPoints receives the snap table from Go (window.phShell.setSnapPoints). */
+function setSnapPoints(points: number[]): void {
+  const clean = (points || []).map(Number).filter((p) => p > 0 && p < 1);
+  if (clean.length) snapPoints = clean;
+}
+
+/** setSplitRatio moves a divider from Go without a re-render: go-app does not
+ *  reliably re-apply an inline custom property, so the menu writes it here. */
+function setSplitRatio(nodeID: string, r: number): void {
+  const div = document.querySelector(`.ph-divider[data-node="${CSS.escape(nodeID)}"]`);
+  const split = div?.parentElement as HTMLElement | null;
+  if (split?.classList.contains("ph-split")) split.style.setProperty("--r", String(r));
 }
 
 // ─── drag drop-zone preview ─────────────────────────────────────────────────────
@@ -1683,6 +1757,8 @@ function safeParse(s: string): Record<string, string> {
   applyTerminalWordMod,
   applyTerminalBell,
   playTerminalBell,
+  setSnapPoints,
+  setSplitRatio,
 };
 
 // The DOM-touching init (drop-hint appends to <body>) must wait: this script runs in

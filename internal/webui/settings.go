@@ -22,11 +22,9 @@ import (
 
 	"github.com/maxence-charriere/go-app/v10/pkg/app"
 
+	"github.com/Gerry3010/projecthub/internal/buildinfo"
 	"github.com/Gerry3010/projecthub/internal/core/domain"
 )
-
-// appVersion is shown on the settings "Über" tab.
-const appVersion = "0.1.0"
 
 // uiTheme is one selectable UI theme (a token-override set in theme.css, keyed by
 // [data-theme]). prevClass drives the small live-ish preview tile in the picker.
@@ -786,7 +784,7 @@ func (r *Root) settingsAbout() app.UI {
 	return app.Div().Class("ph-about").Body(
 		app.Div().Class("ph-about-mark").Body(nexusIcon(r.accentColor(), 56)),
 		app.H2().Class("ph-about-title").Text("ProjectHub"),
-		app.P().Class("ph-muted").Text("Version "+appVersion),
+		app.P().Class("ph-muted").Text("Version "+buildinfo.Get().String()),
 		app.P().Class("ph-settings-note").Text("Ein Claude-Code-zentriertes Projekt-Cockpit mit E2E-verschlüsseltem Vault (Passbubble)."),
 		app.P().Class("ph-settings-note").Text("© 2026 Gerald Hofbauer — AGPLv3."),
 	)

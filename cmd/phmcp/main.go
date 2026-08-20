@@ -37,6 +37,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/Gerry3010/projecthub/internal/buildinfo"
 	"github.com/Gerry3010/projecthub/internal/discovery"
 	"github.com/Gerry3010/projecthub/internal/mcp"
 )
@@ -95,7 +96,7 @@ func handle(req rpcRequest) (rpcResponse, bool) {
 		resp.Result = map[string]any{
 			"protocolVersion": protocolVersion,
 			"capabilities":    map[string]any{"tools": map[string]any{}},
-			"serverInfo":      map[string]any{"name": "projecthub", "version": "0.1.0"},
+			"serverInfo":      map[string]any{"name": "projecthub", "version": buildinfo.Get().Version},
 		}
 	case "notifications/initialized", "notifications/cancelled":
 		return resp, true // notification, no reply
@@ -152,6 +153,12 @@ func callTool(params json.RawMessage) (string, error) {
 	}
 	req.Header.Set("Authorization", "Bearer "+ep.Token)
 	req.Header.Set("Content-Type", "application/json")
+	// Stamp ourselves so app_info can report the bridge's own build: this binary is
+	// launched from wherever Claude Code was configured, which is not necessarily the
+	// bundle the running app came from.
+	if stamp, err := json.Marshal(buildinfo.Get()); err == nil {
+		req.Header.Set("X-ProjectHub-Client", string(stamp))
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return "", err

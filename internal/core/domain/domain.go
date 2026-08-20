@@ -500,6 +500,20 @@ const (
 type Layout struct {
 	Version int         `json:"version"`
 	Root    *LayoutNode `json:"root,omitempty"`
+	// Presets are the user's saved arrangements for THIS project (the layout manager
+	// in the project toolbar). They ride along in the same entry because there is
+	// exactly one ph-layout item per project and they are always read together.
+	Presets []LayoutPreset `json:"presets,omitempty"`
+}
+
+// LayoutPreset is a named snapshot of a workspace arrangement. Root holds the tiles
+// as they were, minus instance-scoped params (a saved layout describes what to open,
+// not which PTY or Claude session it was attached to).
+type LayoutPreset struct {
+	ID      string      `json:"id"`
+	Name    string      `json:"name"`
+	SavedAt time.Time   `json:"saved_at"`
+	Root    *LayoutNode `json:"root,omitempty"`
 }
 
 // LayoutNode is a node in the binary split tree. It is EITHER a split (Dir set, with

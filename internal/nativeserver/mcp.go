@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/Gerry3010/projecthub/internal/buildinfo"
 	"github.com/Gerry3010/projecthub/internal/control"
 	"github.com/Gerry3010/projecthub/internal/mcp"
 	"github.com/Gerry3010/projecthub/internal/tabsession"
@@ -63,7 +64,7 @@ func (s *Server) mcpCall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Local tools.
-	res, err := s.runLocalTool(req.Tool, req.Args)
+	res, err := s.runLocalTool(req.Tool, req.Args, clientBuild(r))
 	if err != nil {
 		httpError(w, err)
 		return
@@ -71,9 +72,29 @@ func (s *Server) mcpCall(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, res)
 }
 
+// clientBuild reads the build stamp cmd/phmcp puts on every call. It lets app_info
+// report the bridge's own identity, which is how a stale phmcp next to a fresh
+// sidecar becomes visible instead of silently misbehaving.
+func clientBuild(r *http.Request) *buildinfo.Info {
+	raw := r.Header.Get(mcpClientHeader)
+	if raw == "" {
+		return nil
+	}
+	var info buildinfo.Info
+	if json.Unmarshal([]byte(raw), &info) != nil {
+		return nil
+	}
+	return &info
+}
+
+// mcpClientHeader carries the calling bridge's buildinfo.Info as JSON.
+const mcpClientHeader = "X-ProjectHub-Client"
+
 // runLocalTool executes a sidecar-side MCP tool (no vault, no renderer needed).
-func (s *Server) runLocalTool(tool string, args json.RawMessage) (any, error) {
+func (s *Server) runLocalTool(tool string, args json.RawMessage, client *buildinfo.Info) (any, error) {
 	switch tool {
+	case "app_info":
+		return s.appInfo(client), nil
 	case "session_list":
 		var a struct {
 			Cwd string `json:"cwd"`
