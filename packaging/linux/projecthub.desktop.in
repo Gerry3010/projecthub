@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=ProjectHub
+GenericName=Project Manager
+Comment=Claude-Code-zentrierter Projekt-Manager mit E2E-Verschlüsselung (Passbubble)
+Exec=@BIN@
+Icon=projecthub
+Terminal=false
+Categories=Development;Utility;
+Keywords=projects;claude;code;terminal;passbubble;
+StartupNotify=true
+StartupWMClass=projecthub-desktop

@@ -60,6 +60,14 @@ man ihn einmal im Login-/Einstellungs-Feld „Backend" ein (geräte-lokal, nicht
 Abschalten mit `PROJECTHUB_NO_AUTOSTACK=1`; override via `PROJECTHUB_PB_DIR` /
 `PROJECTHUB_PB_URL`. Packaging: `make pack-mac` (macOS, Node ≥20.19 → `nvm use` in `app/`).
 
+**Installieren (Linux):** `make install` packt das Bundle und legt es unter
+`~/.local/lib/projecthub/` ab, dazu einen Launcher (`~/.local/bin/projecthub`) und einen
+Eintrag fürs App-Grid — kein sudo, nichts außerhalb von `$PREFIX` (Default `~/.local`).
+Der Launcher startet immer das gepackte Bundle, `projecthub --dev` stattdessen den
+Checkout. Ein laufendes ProjectHub überlebt die Installation und übernimmt das neue
+Bundle beim nächsten Start. Ohne erneutes Packen: `make install-bundle`; wieder weg mit
+`make uninstall` (geräte-lokale Einstellungen in `~/.config/projecthub` bleiben).
+
 ## MCP (Claude Code steuert den Workspace)
 
 Der Sidecar stellt einen MCP-Server bereit, mit dem Claude Code — laufend im

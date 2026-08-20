@@ -2,8 +2,10 @@
 
 PASSBUBBLE_URL ?= http://localhost:8080
 PORT           ?= 8090
+# where `make install` puts the desktop app (per-user by default, no sudo)
+PREFIX         ?= $(HOME)/.local
 
-.PHONY: all wasm server sidecar tabhost phmcp pack pack-mac icons run tui test vet build clean
+.PHONY: all wasm server sidecar tabhost phmcp pack pack-mac install install-bundle uninstall icons run tui test vet build clean
 
 all: build
 
@@ -52,6 +54,44 @@ pack: wasm sidecar tabhost phmcp
 ## fails with ERR_REQUIRE_ESM). With nvm: `nvm use` (see app/.nvmrc).
 pack-mac: wasm sidecar tabhost phmcp
 	cd app && npm run pack:mac
+
+## install: pack the desktop bundle and install it for the current user — the
+## AppImage under $(PREFIX)/lib/projecthub, a launcher in $(PREFIX)/bin and a
+## .desktop entry so it shows up in the app grid. No sudo, nothing outside $(PREFIX).
+install: pack install-bundle
+
+## install-bundle: the install steps without rebuilding — use after `make pack`.
+install-bundle:
+	@set -eu; \
+	img=$$(ls -t app/release/ProjectHub-*.AppImage 2>/dev/null | head -1); \
+	if [ -z "$$img" ]; then echo "make install: no bundle in app/release — run 'make pack' first" >&2; exit 1; fi; \
+	dest="$(PREFIX)/lib/projecthub/ProjectHub.AppImage"; \
+	bin="$(PREFIX)/bin/projecthub"; \
+	mkdir -p "$(PREFIX)/lib/projecthub" "$(PREFIX)/bin" "$(PREFIX)/share/applications" \
+	         "$(PREFIX)/share/icons/hicolor/scalable/apps" "$(PREFIX)/share/icons/hicolor/512x512/apps"; \
+	install -m755 "$$img" "$$dest.new" && mv -f "$$dest.new" "$$dest"; \
+	sed -e 's|@APPIMAGE@|'"$$dest"'|g' -e 's|@REPO@|$(CURDIR)|g' packaging/linux/projecthub.in > "$$bin.new"; \
+	chmod 755 "$$bin.new" && mv -f "$$bin.new" "$$bin"; \
+	sed -e 's|@BIN@|'"$$bin"'|g' packaging/linux/projecthub.desktop.in > "$(PREFIX)/share/applications/projecthub.desktop.new"; \
+	mv -f "$(PREFIX)/share/applications/projecthub.desktop.new" "$(PREFIX)/share/applications/projecthub.desktop"; \
+	cp -f web/icon.svg "$(PREFIX)/share/icons/hicolor/scalable/apps/projecthub.svg"; \
+	cp -f app/build-resources/icon.png "$(PREFIX)/share/icons/hicolor/512x512/apps/projecthub.png"; \
+	command -v update-desktop-database >/dev/null && update-desktop-database "$(PREFIX)/share/applications" || true; \
+	command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -qtf "$(PREFIX)/share/icons/hicolor" || true; \
+	echo "installed $$(basename $$img) → $$dest"; \
+	echo "launcher  $$bin"; \
+	echo "app grid  $(PREFIX)/share/applications/projecthub.desktop"; \
+	echo "note: a running ProjectHub keeps the old bundle until you restart it."
+
+## uninstall: remove what install put under $(PREFIX). Leaves your data alone —
+## the vault lives in Passbubble, the device-local config in ~/.config/projecthub.
+uninstall:
+	rm -rf "$(PREFIX)/lib/projecthub"
+	rm -f "$(PREFIX)/bin/projecthub" \
+	      "$(PREFIX)/share/applications/projecthub.desktop" \
+	      "$(PREFIX)/share/icons/hicolor/scalable/apps/projecthub.svg" \
+	      "$(PREFIX)/share/icons/hicolor/512x512/apps/projecthub.png"
+	@echo "removed. ~/.config/projecthub (device-local settings) was left in place."
 
 ## icons: regenerate the macOS icon.icns (+ refresh icon.png) from web/icon.svg.
 ## Only needed after the logo changes; the generated icns is committed.
