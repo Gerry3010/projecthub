@@ -22,3 +22,6 @@ go.work.sum
 
 # chattr agents-chat binding written by the chattr MCP tooling (per-machine)
 .chattr-agents.json
+
+# Claude Code: lokale Freigaben können Befehle samt Zugangsdaten enthalten (SEC-8)
+.claude/settings.local.json
